@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 4%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 4%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 330 100% 60%; /* Neon Pink */
+    --primary-foreground: 0 0% 98%;
+    --secondary: 195 100% 45%; /* Neon Blue */
+    --secondary-foreground: 0 0% 98%;
+    --accent: 260 100% 65%; /* Neon Purple */
+    --accent-foreground: 0 0% 98%;
+    --border: 240 5% 15%;
+    --input: 240 5% 15%;
+    --ring: 330 100% 60%;
+  }
+}
+
+body {
+  background: radial-gradient(circle at top center, #1a103d 0%, #0a0a0c 100%);
+  color: hsl(var(--foreground));
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+}
+
+.neon-border {
+  box-shadow: 0 0 15px -3px hsla(var(--primary) / 0.3), 0 0 4px -1px hsla(var(--primary) / 0.3);
+  border: 1px solid hsla(var(--primary) / 0.2);
+}
+
+.neon-border-blue {
+  box-shadow: 0 0 15px -3px hsla(var(--secondary) / 0.3), 0 0 4px -1px hsla(var(--secondary) / 0.3);
+  border: 1px solid hsla(var(--secondary) / 0.2);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.neon-text-pink {
+  text-shadow: 0 0 10px hsla(var(--primary) / 0.5);
+}
+
+.neon-text-blue {
+  text-shadow: 0 0 10px hsla(var(--secondary) / 0.5);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsla(var(--primary) / 0.2);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsla(var(--primary) / 0.4);
+}

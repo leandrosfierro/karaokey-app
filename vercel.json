@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "builds": [{ "src": "package.json", "use": "@vercel/next" }],
+  "env": {
+    "OPENAI_API_KEY": "@openai_api_key",
+    "YOUTUBE_API_KEY": "@youtube_api_key",
+    "SPOTIFY_CLIENT_ID": "@spotify_client_id",
+    "SPOTIFY_CLIENT_SECRET": "@spotify_client_secret"
+  }
+}
