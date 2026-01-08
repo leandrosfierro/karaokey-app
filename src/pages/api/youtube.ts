@@ -7,14 +7,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log('[YouTube API] Request received for query:', q);
     console.log('[YouTube API] API Key present:', !!YOUTUBE_API_KEY);
+    console.log('[YouTube API] API Key (first 10 chars):', YOUTUBE_API_KEY?.substring(0, 10));
 
     if (!q) {
         console.error('[YouTube API] Missing query parameter');
         return res.status(400).json({ error: 'Falta el parámetro de búsqueda q' });
     }
 
-    if (!YOUTUBE_API_KEY) {
-        console.warn('[YouTube API] No API key configured - using demo mode');
+    // TEMPORARY: Force demo mode to debug
+    // TODO: Remove this after fixing API key
+    const FORCE_DEMO = true;
+
+    if (!YOUTUBE_API_KEY || FORCE_DEMO) {
+        console.warn('[YouTube API] Using DEMO MODE - API key:', !!YOUTUBE_API_KEY, 'Force demo:', FORCE_DEMO);
         // Fallback or demo mode if no API key is provided
         return res.status(200).json({
             items: [
