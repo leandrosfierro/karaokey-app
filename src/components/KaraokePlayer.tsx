@@ -67,11 +67,24 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             if (hasFetched.current) return;
             hasFetched.current = true;
 
+            console.log('[KaraoKey] Fetching videos for:', song.titulo, song.artista);
+
             try {
                 // 1. Karaoke Search
                 const kQuery = `${song.titulo} ${song.artista || ''} karaoke`;
+                console.log('[KaraoKey] Karaoke query:', kQuery);
+
                 const kRes = await fetch(`/api/youtube?q=${encodeURIComponent(kQuery)}`);
+
+                if (!kRes.ok) {
+                    console.error('[KaraoKey] API Error:', kRes.status, kRes.statusText);
+                    const errorText = await kRes.text();
+                    console.error('[KaraoKey] Error details:', errorText);
+                    throw new Error(`YouTube API failed: ${kRes.status}`);
+                }
+
                 const kData = await kRes.json();
+                console.log('[KaraoKey] Karaoke results:', kData);
 
                 if (kData.items && kData.items.length > 0) {
                     const results: VideoResult[] = kData.items.map((item: any) => ({
@@ -81,21 +94,32 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     }));
                     setAlternatives(results);
                     setKaraokeVideoId(results[0].id);
+                    console.log('[KaraoKey] Karaoke video selected:', results[0].id);
+                } else {
+                    console.warn('[KaraoKey] No karaoke results found');
                 }
 
                 // 2. Original Search
                 const oQuery = `${song.titulo} ${song.artista || ''} official video`;
+                console.log('[KaraoKey] Original query:', oQuery);
+
                 const oRes = await fetch(`/api/youtube?q=${encodeURIComponent(oQuery)}`);
                 const oData = await oRes.json();
+                console.log('[KaraoKey] Original results:', oData);
 
                 if (oData.items && oData.items.length > 0) {
                     setOriginalVideoId(oData.items[0].id.videoId);
+                    console.log('[KaraoKey] Original video selected:', oData.items[0].id.videoId);
+                } else {
+                    console.warn('[KaraoKey] No original results found');
                 }
 
             } catch (error) {
-                console.error("Error fetching videos:", error);
+                console.error("[KaraoKey] CRITICAL Error fetching videos:", error);
+                alert('Error al buscar videos. Verifica la consola del navegador y la configuración de la YouTube API Key.');
             } finally {
                 setLoading(false);
+                console.log('[KaraoKey] Fetch completed. Loading:', false);
             }
         };
 
