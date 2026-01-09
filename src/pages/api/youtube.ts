@@ -14,12 +14,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(400).json({ error: 'Falta el parámetro de búsqueda q' });
     }
 
-    // TEMPORARY: Force demo mode to debug
-    // TODO: Remove this after fixing API key
-    const FORCE_DEMO = true;
-
-    if (!YOUTUBE_API_KEY || FORCE_DEMO) {
-        console.warn('[YouTube API] Using DEMO MODE - API key:', !!YOUTUBE_API_KEY, 'Force demo:', FORCE_DEMO);
+    if (!YOUTUBE_API_KEY) {
+        console.warn('[YouTube API] No API key configured - using demo mode');
         // Fallback or demo mode if no API key is provided
         return res.status(200).json({
             items: [
