@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+import Image from 'next/image';
 import screenfull from 'screenfull';
 import { Maximize2, Minimize2, ArrowLeft, RefreshCw, ListMusic, Trophy, Mic2, Music, Volume2, Settings2 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { useToast } from './Toast';
 
 // NATIVE YOUTUBE API IMPLEMENTATION (Dual Player)
 
@@ -26,6 +28,7 @@ declare global {
 }
 
 export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext }) => {
+    const toast = useToast();
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [karaokeVideoId, setKaraokeVideoId] = useState<string | null>(null);
     const [alternatives, setAlternatives] = useState<VideoResult[]>([]);
@@ -44,6 +47,43 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     // Manual Sync Offset (in seconds) - shift the original track relative to karaoke
     const [syncOffset, setSyncOffset] = useState(0);
 
+    // Refs mirroring latest state so player event callbacks (bound once by the
+    // YouTube API) always read current values without re-binding on every change.
+    const syncOffsetRef = useRef(syncOffset);
+    useEffect(() => { syncOffsetRef.current = syncOffset; }, [syncOffset]);
+
+    const assistLevelRef = useRef(assistLevel);
+    useEffect(() => { assistLevelRef.current = assistLevel; }, [assistLevel]);
+
+    const handleMasterStateChange = (event: any) => {
+        const state = event.data;
+        const offset = syncOffsetRef.current; // Read latest offset
+
+        // Playing
+        if (state === 1) {
+            if (slavePlayer.current && typeof slavePlayer.current.playVideo === 'function') {
+                slavePlayer.current.playVideo();
+
+                const masterTime = masterPlayer.current.getCurrentTime();
+                const slaveTime = slavePlayer.current.getCurrentTime();
+
+                // Target time allows negative offset (clamped to 0)
+                const targetTime = Math.max(0, masterTime + offset);
+
+                if (Math.abs(targetTime - slaveTime) > 0.3) {
+                    slavePlayer.current.seekTo(targetTime, true);
+                }
+            }
+        }
+
+        // Paused/Ended
+        if (state === 2 || state === 0) {
+            if (slavePlayer.current && typeof slavePlayer.current.pauseVideo === 'function') {
+                slavePlayer.current.pauseVideo();
+            }
+        }
+    };
+
     // Load YouTube API just once
     useEffect(() => {
         if (!window.YT) {
@@ -54,15 +94,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         }
     }, []);
 
-    // Fetch Videos
+    // Fetch Videos. The component is remounted (fresh state) per song via the
+    // `key` prop set by the parent, so no manual state reset is needed here.
     useEffect(() => {
-        setKaraokeVideoId(null);
-        setOriginalVideoId(null);
-        setAlternatives([]);
-        setLoading(true);
-        setSyncOffset(0); // Reset sync on new song
-        hasFetched.current = false;
-
         const fetchVideos = async () => {
             if (hasFetched.current) return;
             hasFetched.current = true;
@@ -116,7 +150,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
 
             } catch (error) {
                 console.error("[KaraoKey] CRITICAL Error fetching videos:", error);
-                alert('Error al buscar videos. Verifica la consola del navegador y la configuración de la YouTube API Key.');
+                toast('Error al buscar videos. Verifica la consola del navegador y la configuración de la YouTube API Key.', { type: 'error', duration: 6000 });
             } finally {
                 setLoading(false);
                 console.log('[KaraoKey] Fetch completed. Loading:', false);
@@ -126,7 +160,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         if (song.titulo) {
             fetchVideos();
         }
-    }, [song.titulo, song.artista]);
+    }, [song.titulo, song.artista, toast]);
 
     // Initialize/Update MASTER Player (Karaoke)
     useEffect(() => {
@@ -149,8 +183,8 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 },
                 events: {
                     'onReady': (event: any) => {
-                        // Apply initial volume
-                        const vol = Math.floor((1 - assistLevel) * 100);
+                        // Apply initial volume (read from ref: always current, no re-init on crossfader moves)
+                        const vol = Math.floor((1 - assistLevelRef.current) * 100);
                         event.target.setVolume(vol);
                     },
                     'onStateChange': (event: any) => {
@@ -216,40 +250,6 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         }
     }, [originalVideoId]);
 
-    // Sync Logic Handler
-    // We use a ref for syncOffset to ensure the callback always reads the latest value without re-binding
-    const syncOffsetRef = useRef(syncOffset);
-    useEffect(() => { syncOffsetRef.current = syncOffset; }, [syncOffset]);
-
-    const handleMasterStateChange = (event: any) => {
-        const state = event.data;
-        const offset = syncOffsetRef.current; // Read latest offset
-
-        // Playing
-        if (state === 1) {
-            if (slavePlayer.current && typeof slavePlayer.current.playVideo === 'function') {
-                slavePlayer.current.playVideo();
-
-                const masterTime = masterPlayer.current.getCurrentTime();
-                const slaveTime = slavePlayer.current.getCurrentTime();
-
-                // Target time allows negative offset (clamped to 0)
-                const targetTime = Math.max(0, masterTime + offset);
-
-                if (Math.abs(targetTime - slaveTime) > 0.3) {
-                    slavePlayer.current.seekTo(targetTime, true);
-                }
-            }
-        }
-
-        // Paused/Ended
-        if (state === 2 || state === 0) {
-            if (slavePlayer.current && typeof slavePlayer.current.pauseVideo === 'function') {
-                slavePlayer.current.pauseVideo();
-            }
-        }
-    };
-
     // Resync on Offset Change while Playing
     useEffect(() => {
         if (masterPlayer.current && slavePlayer.current &&
@@ -313,11 +313,11 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 space-y-8 relative z-[2000]"
+            className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 space-y-8 relative z-2000"
         >
             <div className="text-center space-y-4 relative z-10 w-full max-w-4xl">
                 <div className="space-y-1">
-                    <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
+                    <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
                         ¡A ESCENARIO!
                     </h2>
                     <p className="text-white font-bold text-xl tracking-widest text-shadow">
@@ -329,7 +329,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     <motion.div
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="inline-flex items-center gap-2 px-6 py-2 bg-yellow-400/20 border border-yellow-400/40 rounded-full text-yellow-300 text-sm font-bold uppercase tracking-wider backdrop-blur-sm"
+                        className="inline-flex items-center gap-2 px-6 py-2 bg-yellow-400/20 border border-yellow-400/40 rounded-full text-yellow-300 text-sm font-bold uppercase tracking-wider backdrop-blur-xs"
                     >
                         <Trophy size={16} /> {challenge}
                     </motion.div>
@@ -356,7 +356,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                             </>
                         ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center bg-black/60 gap-4">
-                                <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-[#FF3B81] border-r-transparent"></div>
+                                <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-neon-pink border-r-transparent"></div>
                                 <p className="text-white font-bold tracking-widest animate-pulse">BUSCANDO PISTAS...</p>
                             </div>
                         )}
@@ -391,20 +391,20 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         <div className="glass-card p-6 rounded-3xl border border-white/5 flex flex-col md:flex-row items-center gap-8 justify-between bg-black/40 backdrop-blur-xl">
                             <button
                                 onClick={() => setAssistLevel(0)}
-                                className={`flex items-center gap-3 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 0 ? "bg-[#FF3B81] text-white shadow-lg shadow-[#FF3B81]/30" : "text-white/50 hover:bg-white/10"}`}
+                                className={`flex items-center gap-3 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 0 ? "bg-neon-pink text-white shadow-lg shadow-[#FF3B81]/30" : "text-white/50 hover:bg-white/10"}`}
                             >
                                 <Mic2 size={18} />
                                 <span>Solo Karaoke</span>
                             </button>
 
                             <div className="flex-1 w-full max-w-md flex flex-col items-center gap-3">
-                                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[#00B7ED]">
+                                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-neon-blue">
                                     <Volume2 size={14} />
                                     <span>Mezclador Crossfader</span>
                                 </div>
                                 <div className="relative w-full h-3 bg-gray-800 rounded-full overflow-hidden">
                                     <div
-                                        className="absolute top-0 left-0 h-full bg-gradient-to-r from-[#FF3B81] to-[#00B7ED]"
+                                        className="absolute top-0 left-0 h-full bg-linear-to-r from-[#FF3B81] to-[#00B7ED]"
                                         style={{ width: `${assistLevel * 100}%` }}
                                     />
                                     <input
@@ -426,7 +426,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
 
                             <button
                                 onClick={() => setAssistLevel(1)}
-                                className={`flex items-center gap-3 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 1 ? "bg-[#00B7ED] text-white shadow-lg shadow-[#00B7ED]/30" : "text-white/50 hover:bg-white/10"}`}
+                                className={`flex items-center gap-3 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 1 ? "bg-neon-blue text-white shadow-lg shadow-[#00B7ED]/30" : "text-white/50 hover:bg-white/10"}`}
                             >
                                 <span>Solo Voz Original</span>
                                 <Music size={18} />
@@ -438,7 +438,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                             <div className="glass-card p-3 rounded-xl border border-white/5 flex flex-wrap items-center justify-center gap-4 bg-black/20 animate-in slide-in-from-top-2">
                                 <span className="text-xs font-bold uppercase tracking-widest text-white/60 flex items-center gap-2">
                                     <Settings2 size={14} /> Ajuste de Sincronización:
-                                    <span className="text-[#00B7ED] bg-white/5 px-2 py-0.5 rounded font-mono">{syncOffset > 0 ? '+' : ''}{syncOffset.toFixed(1)}s</span>
+                                    <span className="text-neon-blue bg-white/5 px-2 py-0.5 rounded-sm font-mono">{syncOffset > 0 ? '+' : ''}{syncOffset.toFixed(1)}s</span>
                                 </span>
                                 <div className="flex items-center gap-2">
                                     <button
@@ -490,7 +490,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         </button>
                         <button
                             onClick={onNext}
-                            className="px-8 py-3 rounded-2xl bg-gradient-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
+                            className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
                         >
                             <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
                         </button>
@@ -508,14 +508,21 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                                 key={video.id}
                                 onClick={() => setKaraokeVideoId(video.id)}
                                 className={`w-full group text-left space-y-2 p-3 rounded-2xl transition-all border cursor-pointer hover:shadow-lg ${karaokeVideoId === video.id
-                                    ? 'bg-[#FF3B81]/10 border-[#FF3B81]/40 shadow-lg shadow-[#FF3B81]/10'
+                                    ? 'bg-neon-pink/10 border-neon-pink/40 shadow-lg shadow-[#FF3B81]/10'
                                     : 'bg-white/5 border-white/5 hover:border-white/10 hover:bg-white/10'
                                     }`}
                             >
                                 <div className="relative aspect-video rounded-xl overflow-hidden pointer-events-none group-hover:scale-[1.02] transition-transform">
-                                    <img src={video.thumbnail} alt={video.title} className="w-full h-full object-cover" />
+                                    <Image
+                                        src={video.thumbnail}
+                                        alt={video.title}
+                                        fill
+                                        sizes="(min-width: 1024px) 300px, 100vw"
+                                        className="object-cover"
+                                        unoptimized
+                                    />
                                     {karaokeVideoId === video.id && (
-                                        <div className="absolute top-2 right-2 bg-[#FF3B81] text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-lg">
+                                        <div className="absolute top-2 right-2 bg-neon-pink text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-lg">
                                             ACTUAL
                                         </div>
                                     )}

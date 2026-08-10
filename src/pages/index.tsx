@@ -1,15 +1,40 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, Github } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
+import { useToast } from "../components/Toast";
 
 type Cancion = { titulo: string; artista?: string };
 
+// "Título - Artista" (used by the one-by-one input and the bulk-paste textarea)
+function parseCancionLine(line: string): Cancion {
+  const [t, a] = line.split("-");
+  return { titulo: t.trim(), artista: a?.trim() };
+}
+
+// "Artist - Song (Karaoke)" -> { titulo: "Song", artista: "Artist" }. Naive heuristic,
+// shared by the channel and playlist imports since both return the same YouTube snippet shape.
+function parseKaraokeVideoTitle(item: any): Cancion {
+  let fullTitle: string = item.snippet.title;
+  fullTitle = fullTitle
+    .replace(/\(Karaoke Version\)/i, "")
+    .replace(/Karaoke/i, "")
+    .replace(/Lyrics/i, "")
+    .replace(/Letra/i, "")
+    .trim();
+
+  const parts = fullTitle.split("-");
+  if (parts.length >= 2) {
+    return { titulo: parts[1].trim(), artista: parts[0].trim() };
+  }
+  return { titulo: fullTitle, artista: item.snippet.channelTitle };
+}
+
 interface SorteoResult {
-  participante: string;
+  participantes: string[];
   cancion: Cancion;
   desafio: string;
   id: string;
@@ -18,21 +43,28 @@ interface SorteoResult {
 type ViewState = 'setup' | 'player';
 
 export default function Home() {
+  const toast = useToast();
   const [participantes, setParticipantes] = useState<string[]>([]);
   const [canciones, setCanciones] = useState<Cancion[]>([]);
+  const [yaCantaron, setYaCantaron] = useState<string[]>([]);
   const [sorteo, setSorteo] = useState<SorteoResult | null>(null);
   const [girando, setGirando] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [view, setView] = useState<ViewState>('setup');
-  const [selectedParticipante, setSelectedParticipante] = useState<string | null>(null);
+  const [selectedParticipantes, setSelectedParticipantes] = useState<string[]>([]);
   const [selectedCancion, setSelectedCancion] = useState<Cancion | null>(null);
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [modoDuo, setModoDuo] = useState(false);
 
-  // Persistence
+  // Persistence: localStorage is unavailable during SSR, so this one-time
+  // hydration read has to happen post-mount. Not a derived-state effect.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const savedP = localStorage.getItem("karaokey-participantes");
     const savedC = localStorage.getItem("karaokey-canciones");
+    const savedYc = localStorage.getItem("karaokey-ya-cantaron");
+    const savedDuo = localStorage.getItem("karaokey-modo-duo");
     if (savedP) setParticipantes(JSON.parse(savedP));
     else setParticipantes(["Lean", "Caro", "Mati", "Romi"]);
 
@@ -43,18 +75,46 @@ export default function Home() {
       { titulo: "Color Esperanza", artista: "Diego Torres" },
       { titulo: "Soy Cordobés", artista: "La Mona" }
     ]);
+    if (savedYc) setYaCantaron(JSON.parse(savedYc));
+    if (savedDuo) setModoDuo(JSON.parse(savedDuo));
     setMounted(true);
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (mounted) {
       localStorage.setItem("karaokey-participantes", JSON.stringify(participantes));
       localStorage.setItem("karaokey-canciones", JSON.stringify(canciones));
+      localStorage.setItem("karaokey-ya-cantaron", JSON.stringify(yaCantaron));
+      localStorage.setItem("karaokey-modo-duo", JSON.stringify(modoDuo));
     }
-  }, [participantes, canciones, mounted]);
+  }, [participantes, canciones, yaCantaron, modoDuo, mounted]);
+
+  const toggleModoDuo = () => {
+    if (!modoDuo && participantes.length < 2) {
+      toast("Necesitás al menos 2 participantes para el modo dúo", { type: 'error' });
+      return;
+    }
+    setModoDuo((prev) => !prev);
+    setSelectedParticipantes([]);
+  };
+
+  const toggleSelectedParticipante = (p: string) => {
+    setSelectedParticipantes((prev) => {
+      if (prev.includes(p)) return prev.filter((x) => x !== p);
+      const max = modoDuo ? 2 : 1;
+      if (prev.length < max) return [...prev, p];
+      // At capacity: drop the oldest pick to make room for the new one
+      return [...prev.slice(1), p];
+    });
+  };
 
   const pedirSorteo = async () => {
     if (participantes.length === 0 || canciones.length === 0) return;
+    if (modoDuo && participantes.length < 2) {
+      toast("Necesitás al menos 2 participantes para el modo dúo", { type: 'error' });
+      return;
+    }
 
     setGirando(true);
     setSorteo(null);
@@ -63,8 +123,12 @@ export default function Home() {
       const res = await fetch("/api/sorteo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantes, canciones })
+        body: JSON.stringify({ participantes, canciones, modoDuo })
       });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Error al sortear');
+      }
       const data: SorteoResult = await res.json();
 
       // Simulate spinning time
@@ -85,31 +149,34 @@ export default function Home() {
       }, 3000);
     } catch (error) {
       setGirando(false);
+      toast(error instanceof Error ? error.message : "Error al sortear", { type: 'error' });
     }
   };
 
-  const startStage = (p: string, c: Cancion, challenge?: string) => {
+  const startStage = (p: string[], c: Cancion, challenge?: string) => {
     setSorteo({
-      participante: p,
+      participantes: p,
       cancion: c,
       desafio: challenge || "¡A darlo todo!",
       id: Date.now().toString()
     });
+    setYaCantaron((prev) => Array.from(new Set([...prev, ...p])));
     confetti.reset();
     setView('player');
     setShowWinnerModal(false);
   };
 
   const handleManualStart = () => {
-    if (!selectedParticipante) {
-      alert("¡Falta elegir quién canta!");
+    const requeridos = modoDuo ? 2 : 1;
+    if (selectedParticipantes.length < requeridos) {
+      toast(modoDuo ? "¡Faltan elegir los 2 cantantes!" : "¡Falta elegir quién canta!", { type: 'error' });
       return;
     }
     if (!selectedCancion) {
-      alert("¡Falta elegir qué canción cantar!");
+      toast("¡Falta elegir qué canción cantar!", { type: 'error' });
       return;
     }
-    startStage(selectedParticipante, selectedCancion);
+    startStage(selectedParticipantes, selectedCancion);
   };
 
   const addParticipante = (name: string) => {
@@ -118,53 +185,99 @@ export default function Home() {
   };
 
   const removeParticipante = (index: number) => {
+    const removed = participantes[index];
     setParticipantes((p: string[]) => p.filter((_, i) => i !== index));
+    toast(`${removed} eliminado de participantes`, {
+      action: {
+        label: 'Deshacer',
+        onClick: () => setParticipantes((p) => {
+          const copy = [...p];
+          copy.splice(index, 0, removed);
+          return copy;
+        })
+      }
+    });
   };
 
   const addCancion = (v: string) => {
     if (!v.trim()) return;
-    const [t, a] = v.split("-");
-    setCanciones((c: Cancion[]) => [...c, { titulo: t.trim(), artista: a?.trim() }]);
+    setCanciones((c: Cancion[]) => [...c, parseCancionLine(v)]);
+  };
+
+  const addCancionesBulk = () => {
+    const lineas = bulkText.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lineas.length === 0) {
+      toast("Pegá al menos una canción", { type: 'error' });
+      return;
+    }
+    const nuevas = lineas.map(parseCancionLine);
+    setCanciones((c: Cancion[]) => [...c, ...nuevas]);
+    toast(`¡Se agregaron ${nuevas.length} canciones!`, { type: 'success' });
+    setBulkText("");
   };
 
   const removeCancion = (index: number) => {
+    const removed = canciones[index];
     setCanciones((c: Cancion[]) => c.filter((_, i) => i !== index));
+    toast(`"${removed.titulo}" eliminada`, {
+      action: {
+        label: 'Deshacer',
+        onClick: () => setCanciones((c) => {
+          const copy = [...c];
+          copy.splice(index, 0, removed);
+          return copy;
+        })
+      }
+    });
   };
 
-  const [importing, setImporting] = useState(false);
-
-  // ... existing logic ...
+  const [importingChannel, setImportingChannel] = useState(false);
+  const [importingPlaylist, setImportingPlaylist] = useState(false);
+  const [bulkText, setBulkText] = useState("");
 
   const importFromChannel = async (query: string) => {
-    setImporting(true);
+    setImportingChannel(true);
     try {
       const res = await fetch(`/api/channel-videos?q=${encodeURIComponent(query)}`);
       const data = await res.json();
-      if (data.items) {
-        const newSongs: Cancion[] = data.items.map((item: any) => {
-          // Simple cleanup of titles: "Artist - Song (Karaoke)" -> { titulo: "Song", artista: "Artist" }
-          // This is a naive heuristic, can be improved.
-          let fullTitle = item.snippet.title;
-          // Remove common karaoke suffixes
-          fullTitle = fullTitle.replace(/\(Karaoke Version\)/i, "").replace(/Karaoke/i, "").replace(/Lyrics/i, "").replace(/Letra/i, "").trim();
-
-          const parts = fullTitle.split("-");
-          if (parts.length >= 2) {
-            return { titulo: parts[1].trim(), artista: parts[0].trim() };
-          }
-          return { titulo: fullTitle, artista: item.snippet.channelTitle };
-        });
-
+      if (data.items?.length) {
+        const newSongs: Cancion[] = data.items.map(parseKaraokeVideoTitle);
         setCanciones(prev => [...prev, ...newSongs]);
-        alert(`¡Se agregaron ${newSongs.length} canciones exitosamente!`);
+        toast(`¡Se agregaron ${newSongs.length} canciones!`, { type: 'success' });
         setShowSettings(false);
       } else {
-        alert("No se encontraron videos o hubo un error.");
+        toast("No se encontraron videos o hubo un error.", { type: 'error' });
       }
     } catch (e) {
-      alert("Error importando canciones.");
+      toast("Error importando canciones.", { type: 'error' });
     } finally {
-      setImporting(false);
+      setImportingChannel(false);
+    }
+  };
+
+  const importFromPlaylist = async (url: string) => {
+    setImportingPlaylist(true);
+    try {
+      const res = await fetch(`/api/playlist-videos?url=${encodeURIComponent(url)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Error al importar la playlist');
+      }
+      const newSongs: Cancion[] = data.items
+        .filter((item: any) => !['Deleted video', 'Private video'].includes(item.snippet.title))
+        .map(parseKaraokeVideoTitle);
+
+      if (newSongs.length === 0) {
+        toast("No se encontraron canciones válidas en esa playlist", { type: 'error' });
+        return;
+      }
+      setCanciones(prev => [...prev, ...newSongs]);
+      toast(`¡Se agregaron ${newSongs.length} canciones de la playlist!`, { type: 'success' });
+      setShowSettings(false);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Error importando la playlist.", { type: 'error' });
+    } finally {
+      setImportingPlaylist(false);
     }
   };
 
@@ -193,14 +306,14 @@ export default function Home() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4"
             onClick={() => setShowSettings(false)}
           >
             <motion.div
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.9, y: 20 }}
-              className="bg-[#121212] border border-white/10 rounded-3xl p-6 max-w-lg w-full space-y-6"
+              className="bg-[#121212] border border-white/10 rounded-3xl p-6 max-w-lg w-full space-y-6 max-h-[85vh] overflow-y-auto custom-scrollbar"
               onClick={e => e.stopPropagation()}
             >
               <h3 className="text-2xl font-bold text-white mb-4">Configuración de Canciones</h3>
@@ -213,10 +326,10 @@ export default function Home() {
                     <button
                       key={channel}
                       onClick={() => importFromChannel(channel)}
-                      disabled={importing}
+                      disabled={importingChannel}
                       className="p-3 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-left flex items-center gap-2 truncate"
                     >
-                      {importing ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Plus size={14} />}
+                      {importingChannel ? <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Plus size={14} />}
                       {channel}
                     </button>
                   ))}
@@ -225,12 +338,60 @@ export default function Home() {
                 <div className="pt-4 border-t border-white/10">
                   <p className="text-sm text-white/60 mb-2">O pega un link/handle personalizado:</p>
                   <FormInput
-                    icon={<Github size={18} />} // Placeholder icon
+                    icon={<AtSign size={18} />}
                     placeholder="@MiCanalFavorito"
                     onSubmit={(val) => importFromChannel(val)}
                     color="blue"
                   />
                 </div>
+
+                <div className="pt-4 border-t border-white/10 space-y-2">
+                  <p className="text-sm text-white/60">Importar una playlist completa de YouTube:</p>
+                  <FormInput
+                    icon={<ListMusic size={18} />}
+                    placeholder="Link de la playlist de YouTube"
+                    onSubmit={(val) => importFromPlaylist(val)}
+                    color="blue"
+                  />
+                  {importingPlaylist && (
+                    <p className="text-xs text-white/40 flex items-center gap-2 pt-1">
+                      <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin shrink-0" />
+                      Importando playlist...
+                    </p>
+                  )}
+                </div>
+
+                <div className="pt-4 border-t border-white/10 space-y-2">
+                  <p className="text-sm text-white/60">O pegá una lista en bloque (una canción por línea, &quot;Título - Artista&quot;):</p>
+                  <textarea
+                    value={bulkText}
+                    onChange={(e) => setBulkText(e.target.value)}
+                    placeholder={"De música ligera - Soda Stereo\nColor Esperanza - Diego Torres"}
+                    rows={4}
+                    className="w-full rounded-xl p-3 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 transition-all text-sm text-white placeholder:text-white/20 font-sans resize-none"
+                  />
+                  <button
+                    onClick={addCancionesBulk}
+                    disabled={!bulkText.trim()}
+                    className="w-full flex items-center justify-center gap-2 p-3 bg-neon-blue/10 hover:bg-neon-blue/20 disabled:opacity-40 disabled:cursor-not-allowed border border-neon-blue/20 rounded-xl text-xs font-bold uppercase tracking-wider text-neon-blue transition-colors"
+                  >
+                    <ListPlus size={14} /> Agregar Todas
+                  </button>
+                </div>
+
+                {yaCantaron.length > 0 && (
+                  <div className="pt-4 border-t border-white/10">
+                    <button
+                      onClick={() => {
+                        setYaCantaron([]);
+                        toast("Se reinició quién ya cantó", { type: 'success' });
+                      }}
+                      className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70"
+                    >
+                      <RotateCcw size={14} /> Reiniciar quién ya cantó ({yaCantaron.length})
+                    </button>
+                  </div>
+                )}
               </div>
             </motion.div>
           </motion.div>
@@ -252,20 +413,34 @@ export default function Home() {
                 animate={{ scale: 1, opacity: 1 }}
                 className="inline-block"
               >
-                <h1 className="text-6xl md:text-8xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-[#FF3B81] via-[#9D4EDD] to-[#00B7ED] animate-gradient">
+                <h1 className="text-6xl md:text-8xl font-black italic tracking-tighter text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] via-[#9D4EDD] to-[#00B7ED] animate-gradient">
                   KARAOKEY
                 </h1>
               </motion.div>
               <p className="text-white/60 text-lg md:text-xl font-medium">
                 ¿Quién canta ahora? ¡Que la suerte decida!
               </p>
+
+              <button
+                onClick={toggleModoDuo}
+                className={`inline-flex items-center gap-3 px-4 py-2 rounded-full border transition-all ${modoDuo
+                  ? 'bg-neon-blue/20 border-neon-blue text-white shadow-[0_0_15px_rgba(0,183,237,0.3)]'
+                  : 'bg-white/5 border-white/10 text-white/50 hover:border-white/20'
+                  }`}
+              >
+                <Users2 size={16} />
+                <span className="text-xs font-bold uppercase tracking-widest">Modo Dúo</span>
+                <span className={`relative w-9 h-5 rounded-full transition-colors ${modoDuo ? 'bg-neon-blue' : 'bg-white/15'}`}>
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${modoDuo ? 'translate-x-4' : ''}`} />
+                </span>
+              </button>
             </header>
 
             <div className="grid lg:grid-cols-3 gap-8">
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-2">
-                  <Users className="text-[#FF3B81] w-5 h-5" />
-                  <h2 className="text-xl font-bold uppercase tracking-wider text-[#FF3B81]">Participantes</h2>
+                  <Users className="text-neon-pink w-5 h-5" />
+                  <h2 className="text-xl font-bold uppercase tracking-wider text-neon-pink">Participantes</h2>
                 </div>
                 <div className="glass-card rounded-2xl p-4 min-h-[400px] flex flex-col border border-white/5 bg-white/5 backdrop-blur-md">
                   <div className="flex-1 space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
@@ -273,16 +448,21 @@ export default function Home() {
                       {participantes.map((p, i) => (
                         <motion.div
                           key={`${p}-${i}`}
-                          onClick={() => setSelectedParticipante(p === selectedParticipante ? null : p)}
+                          onClick={() => toggleSelectedParticipante(p)}
                           initial={{ x: -20, opacity: 0 }}
                           animate={{ x: 0, opacity: 1 }}
                           exit={{ x: 20, opacity: 0 }}
-                          className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${selectedParticipante === p
-                            ? 'bg-[#FF3B81]/20 border-[#FF3B81] shadow-[0_0_15px_rgba(255,59,129,0.3)]'
+                          className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${selectedParticipantes.includes(p)
+                            ? 'bg-neon-pink/20 border-neon-pink shadow-[0_0_15px_rgba(255,59,129,0.3)]'
                             : 'bg-white/5 border-white/5 hover:border-white/10'
                             }`}
                         >
-                          <span className="font-medium">{p}</span>
+                          <span className="font-medium flex items-center gap-2">
+                            {p}
+                            {yaCantaron.includes(p) && (
+                              <CheckCircle2 size={14} className="text-emerald-400 shrink-0" aria-label="Ya cantó" />
+                            )}
+                          </span>
                           <button onClick={(e) => { e.stopPropagation(); removeParticipante(i); }} className="text-white/20 hover:text-red-400 transition-colors">
                             <Trash2 size={16} />
                           </button>
@@ -302,11 +482,11 @@ export default function Home() {
                 <div className="absolute -top-12 w-full flex justify-center z-10">
                   <button
                     onClick={handleManualStart}
-                    className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipante && selectedCancion
+                    className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && selectedCancion
                       ? 'bg-green-500 text-white shadow-lg hover:scale-105'
                       : 'bg-white/5 text-white/30 cursor-not-allowed'
                       }`}
-                    disabled={!selectedParticipante || !selectedCancion}
+                    disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || !selectedCancion}
                   >
                     Ir al Escenario (Manual)
                   </button>
@@ -320,8 +500,8 @@ export default function Home() {
                   <div className="relative z-10 space-y-8">
                     <div className="space-y-6">
                       <div className="space-y-2">
-                        <label className="text-xs uppercase tracking-widest opacity-50 font-bold">Cantante</label>
-                        <SlotMachine items={participantes} isSpinning={girando} result={sorteo?.participante || null} color="330 100% 60%" />
+                        <label className="text-xs uppercase tracking-widest opacity-50 font-bold">{modoDuo ? 'Cantantes' : 'Cantante'}</label>
+                        <SlotMachine items={participantes} isSpinning={girando} result={sorteo?.participantes.join(' & ') || null} color="330 100% 60%" />
                       </div>
 
                       <div className="space-y-2">
@@ -342,7 +522,7 @@ export default function Home() {
                             <div className="inline-flex items-center gap-2 text-yellow-400 font-bold uppercase text-[10px] tracking-widest">
                               <Trophy size={12} /> Desafío Especial
                             </div>
-                            <p className="text-md font-medium italic">"{sorteo.desafio}"</p>
+                            <p className="text-md font-medium italic">&ldquo;{sorteo.desafio}&rdquo;</p>
                           </motion.div>
                         ) : (
                           <motion.div
@@ -360,7 +540,7 @@ export default function Home() {
                     <button
                       onClick={pedirSorteo}
                       disabled={girando || participantes.length === 0 || canciones.length === 0}
-                      className="w-full py-4 rounded-2xl bg-gradient-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
+                      className="w-full py-4 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
                     >
                       {girando ? (
                         <>
@@ -379,8 +559,8 @@ export default function Home() {
 
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-2">
-                  <Music className="text-[#00B7ED] w-5 h-5" />
-                  <h2 className="text-xl font-bold uppercase tracking-wider text-[#00B7ED]">Cancionero</h2>
+                  <Music className="text-neon-blue w-5 h-5" />
+                  <h2 className="text-xl font-bold uppercase tracking-wider text-neon-blue">Cancionero</h2>
                 </div>
                 <div className="glass-card rounded-2xl p-4 min-h-[400px] flex flex-col border border-white/5 bg-white/5 backdrop-blur-md">
                   <div className="flex-1 space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
@@ -393,7 +573,7 @@ export default function Home() {
                           animate={{ x: 0, opacity: 1 }}
                           exit={{ x: -20, opacity: 0 }}
                           className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${selectedCancion === c
-                            ? 'bg-[#00B7ED]/20 border-[#00B7ED] shadow-[0_0_15px_rgba(0,183,237,0.3)]'
+                            ? 'bg-neon-blue/20 border-neon-blue shadow-[0_0_15px_rgba(0,183,237,0.3)]'
                             : 'bg-white/5 border-white/5 hover:border-white/10'
                             }`}
                         >
@@ -423,26 +603,26 @@ export default function Home() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                  className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4"
                 >
                   <motion.div
                     initial={{ scale: 0.9, y: 20 }}
                     animate={{ scale: 1, y: 0 }}
                     className="bg-[#1a1a1a] border border-white/10 rounded-3xl p-8 max-w-md w-full text-center space-y-6 relative overflow-hidden"
                   >
-                    <div className="absolute inset-0 bg-gradient-to-br from-[#FF3B81]/10 to-[#00B7ED]/10" />
+                    <div className="absolute inset-0 bg-linear-to-br from-[#FF3B81]/10 to-[#00B7ED]/10" />
 
                     <div className="relative z-10 space-y-4">
                       <h3 className="text-3xl font-black italic uppercase text-white">¡Sorteo Listo!</h3>
 
                       <div className="space-y-2 py-4">
                         <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
-                          <p className="text-xs uppercase tracking-widest opacity-50">Cantante</p>
-                          <p className="text-2xl font-bold text-[#FF3B81]">{sorteo.participante}</p>
+                          <p className="text-xs uppercase tracking-widest opacity-50">{sorteo.participantes.length > 1 ? 'Cantantes' : 'Cantante'}</p>
+                          <p className="text-2xl font-bold text-neon-pink">{sorteo.participantes.join(' & ')}</p>
                         </div>
                         <div className="p-4 bg-white/5 rounded-2xl border border-white/10">
                           <p className="text-xs uppercase tracking-widest opacity-50">Tema</p>
-                          <p className="text-xl font-bold text-[#00B7ED]">{sorteo.cancion.titulo}</p>
+                          <p className="text-xl font-bold text-neon-blue">{sorteo.cancion.titulo}</p>
                           <p className="text-xs opacity-50">{sorteo.cancion.artista}</p>
                         </div>
                         <div className="text-yellow-400 text-sm font-bold flex items-center justify-center gap-2">
@@ -451,7 +631,7 @@ export default function Home() {
                       </div>
 
                       <button
-                        onClick={() => startStage(sorteo.participante, sorteo.cancion, sorteo.desafio)}
+                        onClick={() => startStage(sorteo.participantes, sorteo.cancion, sorteo.desafio)}
                         className="w-full py-4 rounded-xl bg-white text-black font-black uppercase tracking-widest hover:scale-105 transition-transform"
                       >
                         ¡Al Escenario!
@@ -470,8 +650,8 @@ export default function Home() {
 
             <footer className="pt-12 flex flex-col items-center gap-4 text-white/40">
               <div className="flex items-center gap-6">
-                <a href="https://github.com/leandrofierro" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">
-                  <Github size={20} />
+                <a href="https://github.com/leandrofierro" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors" aria-label="GitHub">
+                  <GithubIcon size={20} />
                 </a>
               </div>
               <p className="text-xs uppercase tracking-widest font-bold">
@@ -481,7 +661,7 @@ export default function Home() {
           </motion.main>
         ) : (
           <KaraokePlayer
-            key="player"
+            key={sorteo!.id}
             song={sorteo!.cancion}
             challenge={sorteo!.desafio}
             onBack={() => setView('setup')}
@@ -522,7 +702,7 @@ interface FormInputProps {
 
 function FormInput({ icon, placeholder, onSubmit, color }: FormInputProps) {
   const [v, setV] = useState("");
-  const accentClass = color === 'pink' ? 'hover:bg-[#FF3B81] hover:text-white border-[#FF3B81]/20' : 'hover:bg-[#00B7ED] hover:text-white border-[#00B7ED]/20';
+  const accentClass = color === 'pink' ? 'hover:bg-neon-pink hover:text-white border-neon-pink/20' : 'hover:bg-neon-blue hover:text-white border-neon-blue/20';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -545,7 +725,7 @@ function FormInput({ icon, placeholder, onSubmit, color }: FormInputProps) {
           value={v}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setV(e.target.value)}
           placeholder={placeholder}
-          className="w-full rounded-xl pl-10 pr-4 py-3 bg-white/5 border border-white/10 outline-none focus:border-white/20 transition-all text-sm text-white placeholder:text-white/20 font-sans"
+          className="w-full rounded-xl pl-10 pr-4 py-3 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 transition-all text-sm text-white placeholder:text-white/20 font-sans"
         />
       </div>
       <button
@@ -555,5 +735,19 @@ function FormInput({ icon, placeholder, onSubmit, color }: FormInputProps) {
         OK
       </button>
     </form>
+  );
+}
+
+function GithubIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.69-1.28-1.69-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.8 1.18 1.83 1.18 3.09 0 4.43-2.7 5.4-5.27 5.69.42.36.78 1.07.78 2.16 0 1.56-.01 2.82-.01 3.2 0 .3.2.66.79.55A10.52 10.52 0 0 0 23.5 12c0-6.35-5.15-11.5-11.5-11.5Z" />
+    </svg>
   );
 }

@@ -5,6 +5,7 @@ type ReqBody = {
   participantes: string[];
   canciones: { titulo: string; artista?: string }[];
   desafio?: string;
+  modoDuo?: boolean;
 };
 
 const desafiosBase = [
@@ -18,20 +19,30 @@ const desafiosBase = [
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  const { participantes, canciones, desafio } = req.body as ReqBody;
+  const { participantes, canciones, desafio, modoDuo } = req.body as ReqBody;
 
   if (!participantes?.length || !canciones?.length) {
     return res.status(400).json({ error: "Faltan participantes o canciones" });
   }
+  if (modoDuo && participantes.length < 2) {
+    return res.status(400).json({ error: "Se necesitan al menos 2 participantes para el modo dúo" });
+  }
 
   const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
-  const elegido = pick(participantes);
+
+  // Fisher-Yates shuffle, take as many unique participants as the mode needs
+  const shuffled = [...participantes];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const elegidos = shuffled.slice(0, modoDuo ? 2 : 1);
   const cancion = pick(canciones);
   const reto = desafio || pick(desafiosBase);
 
   res.status(200).json({
     id: randomUUID(),
-    participante: elegido,
+    participantes: elegidos,
     cancion,
     desafio: reto
   });
