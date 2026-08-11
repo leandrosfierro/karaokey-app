@@ -6,8 +6,17 @@ import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
 import { useToast } from "../components/Toast";
+import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow } from "../lib/supabase";
 
 type Cancion = { titulo: string; artista?: string };
+
+const DEFAULT_PARTICIPANTES = ["Lean", "Caro", "Mati", "Romi"];
+const DEFAULT_CANCIONES: Cancion[] = [
+  { titulo: "De música ligera", artista: "Soda Stereo" },
+  { titulo: "La gloria de Dios", artista: "Ricardo Montaner" },
+  { titulo: "Color Esperanza", artista: "Diego Torres" },
+  { titulo: "Soy Cordobés", artista: "La Mona" }
+];
 
 // "Título - Artista" (used by the one-by-one input and the bulk-paste textarea)
 function parseCancionLine(line: string): Cancion {
@@ -44,12 +53,20 @@ type ViewState = 'setup' | 'player';
 
 export default function Home() {
   const toast = useToast();
-  const [participantes, setParticipantes] = useState<string[]>([]);
-  const [canciones, setCanciones] = useState<Cancion[]>([]);
-  const [yaCantaron, setYaCantaron] = useState<string[]>([]);
+  // Source of truth for participantes/canciones/ya-cantó is Supabase, not local
+  // state — these rows are the durable record so the list survives clearing the
+  // browser, switching devices, etc. Everything else (participantes, canciones,
+  // yaCantaron) is derived from these on every render.
+  const [participanteRows, setParticipanteRows] = useState<ParticipanteRow[]>([]);
+  const [cancionRows, setCancionRows] = useState<CancionRow[]>([]);
+  const participantes = participanteRows.map((r) => r.nombre);
+  const canciones: Cancion[] = cancionRows.map((r) => ({ titulo: r.titulo, artista: r.artista ?? undefined }));
+  const yaCantaron = participanteRows.filter((r) => r.ya_canto).map((r) => r.nombre);
+
   const [sorteo, setSorteo] = useState<SorteoResult | null>(null);
   const [girando, setGirando] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [view, setView] = useState<ViewState>('setup');
   const [selectedParticipantes, setSelectedParticipantes] = useState<string[]>([]);
   const [selectedCancion, setSelectedCancion] = useState<Cancion | null>(null);
@@ -57,38 +74,66 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [modoDuo, setModoDuo] = useState(false);
 
-  // Persistence: localStorage is unavailable during SSR, so this one-time
-  // hydration read has to happen post-mount. Not a derived-state effect.
-  /* eslint-disable react-hooks/set-state-in-effect */
+  // Load from Supabase and seed defaults on a brand-new, empty database.
+  // modoDuo is just a session preference, not content worth a DB round-trip,
+  // so it stays in localStorage.
+  /* eslint-disable react-hooks/set-state-in-effect -- env var check is a static,
+     one-time boot-time fact, not state derived from props/state each render */
   useEffect(() => {
-    const savedP = localStorage.getItem("karaokey-participantes");
-    const savedC = localStorage.getItem("karaokey-canciones");
-    const savedYc = localStorage.getItem("karaokey-ya-cantaron");
-    const savedDuo = localStorage.getItem("karaokey-modo-duo");
-    if (savedP) setParticipantes(JSON.parse(savedP));
-    else setParticipantes(["Lean", "Caro", "Mati", "Romi"]);
+    if (!isSupabaseConfigured) {
+      console.error('[KaraoKey] Missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY');
+      setLoadError(true);
+      setMounted(true);
+      return;
+    }
 
-    if (savedC) setCanciones(JSON.parse(savedC));
-    else setCanciones([
-      { titulo: "De música ligera", artista: "Soda Stereo" },
-      { titulo: "La gloria de Dios", artista: "Ricardo Montaner" },
-      { titulo: "Color Esperanza", artista: "Diego Torres" },
-      { titulo: "Soy Cordobés", artista: "La Mona" }
-    ]);
-    if (savedYc) setYaCantaron(JSON.parse(savedYc));
-    if (savedDuo) setModoDuo(JSON.parse(savedDuo));
-    setMounted(true);
+    let cancelled = false;
+    (async () => {
+      const [{ data: pData, error: pErr }, { data: cData, error: cErr }] = await Promise.all([
+        supabase.from('karaokey_participantes').select('*').order('created_at', { ascending: true }),
+        supabase.from('karaokey_canciones').select('*').order('created_at', { ascending: true }),
+      ]);
+
+      if (cancelled) return;
+
+      if (pErr || cErr) {
+        console.error('[KaraoKey] Supabase load error:', pErr, cErr);
+        setLoadError(true);
+      } else {
+        if ((pData?.length ?? 0) === 0) {
+          const { data: seededP } = await supabase
+            .from('karaokey_participantes')
+            .insert(DEFAULT_PARTICIPANTES.map((nombre) => ({ nombre })))
+            .select();
+          setParticipanteRows(seededP ?? []);
+        } else {
+          setParticipanteRows(pData!);
+        }
+
+        if ((cData?.length ?? 0) === 0) {
+          const { data: seededC } = await supabase
+            .from('karaokey_canciones')
+            .insert(DEFAULT_CANCIONES.map((c) => ({ titulo: c.titulo, artista: c.artista ?? null })))
+            .select();
+          setCancionRows(seededC ?? []);
+        } else {
+          setCancionRows(cData!);
+        }
+      }
+
+      const savedDuo = localStorage.getItem("karaokey-modo-duo");
+      if (savedDuo) setModoDuo(JSON.parse(savedDuo));
+      setMounted(true);
+    })();
+    return () => { cancelled = true; };
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (mounted) {
-      localStorage.setItem("karaokey-participantes", JSON.stringify(participantes));
-      localStorage.setItem("karaokey-canciones", JSON.stringify(canciones));
-      localStorage.setItem("karaokey-ya-cantaron", JSON.stringify(yaCantaron));
       localStorage.setItem("karaokey-modo-duo", JSON.stringify(modoDuo));
     }
-  }, [participantes, canciones, yaCantaron, modoDuo, mounted]);
+  }, [modoDuo, mounted]);
 
   const toggleModoDuo = () => {
     if (!modoDuo && participantes.length < 2) {
@@ -160,7 +205,10 @@ export default function Home() {
       desafio: challenge || "¡A darlo todo!",
       id: Date.now().toString()
     });
-    setYaCantaron((prev) => Array.from(new Set([...prev, ...p])));
+    setParticipanteRows((prev) => prev.map((r) => (p.includes(r.nombre) ? { ...r, ya_canto: true } : r)));
+    supabase.from('karaokey_participantes').update({ ya_canto: true }).in('nombre', p).then(({ error }) => {
+      if (error) console.error('[KaraoKey] Failed to save ya_canto:', error);
+    });
     confetti.reset();
     setView('player');
     setShowWinnerModal(false);
@@ -179,54 +227,78 @@ export default function Home() {
     startStage(selectedParticipantes, selectedCancion);
   };
 
-  const addParticipante = (name: string) => {
-    if (!name.trim()) return;
-    setParticipantes((p: string[]) => Array.from(new Set([...p, name.trim()])));
+  const addParticipante = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || participanteRows.some((r) => r.nombre === trimmed)) return;
+    const { data, error } = await supabase.from('karaokey_participantes').insert({ nombre: trimmed }).select().single();
+    if (error || !data) {
+      toast('No se pudo guardar el participante.', { type: 'error' });
+      return;
+    }
+    setParticipanteRows((prev) => [...prev, data]);
   };
 
   const removeParticipante = (index: number) => {
-    const removed = participantes[index];
-    setParticipantes((p: string[]) => p.filter((_, i) => i !== index));
-    toast(`${removed} eliminado de participantes`, {
+    const removed = participanteRows[index];
+    setParticipanteRows((prev) => prev.filter((_, i) => i !== index));
+    supabase.from('karaokey_participantes').delete().eq('id', removed.id).then(({ error }) => {
+      if (error) toast('Error al eliminar de la base de datos.', { type: 'error' });
+    });
+    toast(`${removed.nombre} eliminado de participantes`, {
       action: {
         label: 'Deshacer',
-        onClick: () => setParticipantes((p) => {
-          const copy = [...p];
-          copy.splice(index, 0, removed);
-          return copy;
-        })
+        onClick: async () => {
+          const { data } = await supabase.from('karaokey_participantes').insert(removed).select().single();
+          if (data) setParticipanteRows((prev) => { const copy = [...prev]; copy.splice(index, 0, data); return copy; });
+        }
       }
     });
   };
 
-  const addCancion = (v: string) => {
+  const addCancion = async (v: string) => {
     if (!v.trim()) return;
-    setCanciones((c: Cancion[]) => [...c, parseCancionLine(v)]);
+    const parsed = parseCancionLine(v);
+    const { data, error } = await supabase.from('karaokey_canciones').insert({ titulo: parsed.titulo, artista: parsed.artista ?? null }).select().single();
+    if (error || !data) {
+      toast('No se pudo guardar la canción.', { type: 'error' });
+      return;
+    }
+    setCancionRows((prev) => [...prev, data]);
   };
 
-  const addCancionesBulk = () => {
+  const addCancionesBulk = async () => {
     const lineas = bulkText.split("\n").map((l) => l.trim()).filter(Boolean);
     if (lineas.length === 0) {
       toast("Pegá al menos una canción", { type: 'error' });
       return;
     }
     const nuevas = lineas.map(parseCancionLine);
-    setCanciones((c: Cancion[]) => [...c, ...nuevas]);
-    toast(`¡Se agregaron ${nuevas.length} canciones!`, { type: 'success' });
+    const { data, error } = await supabase
+      .from('karaokey_canciones')
+      .insert(nuevas.map((n) => ({ titulo: n.titulo, artista: n.artista ?? null })))
+      .select();
+    if (error || !data) {
+      toast('No se pudieron guardar las canciones.', { type: 'error' });
+      return;
+    }
+    setCancionRows((prev) => [...prev, ...data]);
+    toast(`¡Se agregaron ${data.length} canciones!`, { type: 'success' });
     setBulkText("");
   };
 
   const removeCancion = (index: number) => {
-    const removed = canciones[index];
-    setCanciones((c: Cancion[]) => c.filter((_, i) => i !== index));
+    const removed = cancionRows[index];
+    setCancionRows((prev) => prev.filter((_, i) => i !== index));
+    supabase.from('karaokey_canciones').delete().eq('id', removed.id).then(({ error }) => {
+      if (error) toast('Error al eliminar de la base de datos.', { type: 'error' });
+    });
     toast(`"${removed.titulo}" eliminada`, {
       action: {
         label: 'Deshacer',
-        onClick: () => setCanciones((c) => {
-          const copy = [...c];
-          copy.splice(index, 0, removed);
-          return copy;
-        })
+        onClick: async () => {
+          const { data } = await supabase.from('karaokey_canciones').insert(removed).select().single();
+          if (data) setCancionRows((prev) => { const copy = [...prev]; copy.splice(index, 0, data); return copy; });
+        }
       }
     });
   };
@@ -235,6 +307,18 @@ export default function Home() {
   const [importingPlaylist, setImportingPlaylist] = useState(false);
   const [bulkText, setBulkText] = useState("");
 
+  // Shared by both import flows below — insert into Supabase first, then mirror
+  // into local state, so an import that fails to save doesn't show as added.
+  const insertCanciones = async (newSongs: Cancion[]): Promise<CancionRow[] | null> => {
+    const { data, error } = await supabase
+      .from('karaokey_canciones')
+      .insert(newSongs.map((s) => ({ titulo: s.titulo, artista: s.artista ?? null })))
+      .select();
+    if (error || !data) return null;
+    setCancionRows((prev) => [...prev, ...data]);
+    return data;
+  };
+
   const importFromChannel = async (query: string) => {
     setImportingChannel(true);
     try {
@@ -242,8 +326,12 @@ export default function Home() {
       const data = await res.json();
       if (data.items?.length) {
         const newSongs: Cancion[] = data.items.map(parseKaraokeVideoTitle);
-        setCanciones(prev => [...prev, ...newSongs]);
-        toast(`¡Se agregaron ${newSongs.length} canciones!`, { type: 'success' });
+        const inserted = await insertCanciones(newSongs);
+        if (!inserted) {
+          toast('No se pudieron guardar las canciones.', { type: 'error' });
+          return;
+        }
+        toast(`¡Se agregaron ${inserted.length} canciones!`, { type: 'success' });
         setShowSettings(false);
       } else {
         toast("No se encontraron videos o hubo un error.", { type: 'error' });
@@ -271,8 +359,12 @@ export default function Home() {
         toast("No se encontraron canciones válidas en esa playlist", { type: 'error' });
         return;
       }
-      setCanciones(prev => [...prev, ...newSongs]);
-      toast(`¡Se agregaron ${newSongs.length} canciones de la playlist!`, { type: 'success' });
+      const inserted = await insertCanciones(newSongs);
+      if (!inserted) {
+        toast('No se pudieron guardar las canciones.', { type: 'error' });
+        return;
+      }
+      toast(`¡Se agregaron ${inserted.length} canciones de la playlist!`, { type: 'success' });
       setShowSettings(false);
     } catch (e) {
       toast(e instanceof Error ? e.message : "Error importando la playlist.", { type: 'error' });
@@ -281,7 +373,23 @@ export default function Home() {
     }
   };
 
-  if (!mounted) return null;
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-white/60">
+        <div className="w-10 h-10 border-4 border-white/20 border-t-neon-pink rounded-full animate-spin" />
+        <p className="text-sm font-bold uppercase tracking-widest">Cargando...</p>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-white/80 px-6 text-center">
+        <p className="text-lg font-bold">No se pudo conectar con la base de datos</p>
+        <p className="text-sm text-white/50 max-w-sm">Revisá tu conexión a internet y recargá la página.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen py-12 px-4 md:px-6 text-white font-sans overflow-x-hidden relative">
@@ -382,9 +490,11 @@ export default function Home() {
                 {yaCantaron.length > 0 && (
                   <div className="pt-4 border-t border-white/10">
                     <button
-                      onClick={() => {
-                        setYaCantaron([]);
-                        toast("Se reinició quién ya cantó", { type: 'success' });
+                      onClick={async () => {
+                        setParticipanteRows((prev) => prev.map((r) => ({ ...r, ya_canto: false })));
+                        const { error } = await supabase.from('karaokey_participantes').update({ ya_canto: false }).eq('ya_canto', true);
+                        if (error) toast('Error al reiniciar en la base de datos.', { type: 'error' });
+                        else toast("Se reinició quién ya cantó", { type: 'success' });
                       }}
                       className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70"
                     >
