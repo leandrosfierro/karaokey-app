@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
@@ -49,7 +49,8 @@ interface SorteoResult {
   id: string;
 }
 
-type ViewState = 'setup' | 'player';
+type ViewState = 'setup' | 'player' | 'cantante';
+type ModoSorteo = 'completo' | 'cantante';
 
 export default function Home() {
   const toast = useToast();
@@ -64,6 +65,7 @@ export default function Home() {
   const yaCantaron = participanteRows.filter((r) => r.ya_canto).map((r) => r.nombre);
 
   const [sorteo, setSorteo] = useState<SorteoResult | null>(null);
+  const [sorteoCantante, setSorteoCantante] = useState<string[] | null>(null);
   const [girando, setGirando] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -72,7 +74,9 @@ export default function Home() {
   const [selectedCancion, setSelectedCancion] = useState<Cancion | null>(null);
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showOpcionesSorteo, setShowOpcionesSorteo] = useState(false);
   const [modoDuo, setModoDuo] = useState(false);
+  const [modoSorteo, setModoSorteo] = useState<ModoSorteo>('completo');
 
   // Load from Supabase and seed defaults on a brand-new, empty database.
   // modoDuo is just a session preference, not content worth a DB round-trip,
@@ -123,6 +127,8 @@ export default function Home() {
 
       const savedDuo = localStorage.getItem("karaokey-modo-duo");
       if (savedDuo) setModoDuo(JSON.parse(savedDuo));
+      const savedModoSorteo = localStorage.getItem("karaokey-modo-sorteo");
+      if (savedModoSorteo === 'completo' || savedModoSorteo === 'cantante') setModoSorteo(savedModoSorteo);
       setMounted(true);
     })();
     return () => { cancelled = true; };
@@ -132,8 +138,9 @@ export default function Home() {
   useEffect(() => {
     if (mounted) {
       localStorage.setItem("karaokey-modo-duo", JSON.stringify(modoDuo));
+      localStorage.setItem("karaokey-modo-sorteo", modoSorteo);
     }
-  }, [modoDuo, mounted]);
+  }, [modoDuo, modoSorteo, mounted]);
 
   const toggleModoDuo = () => {
     if (!modoDuo && participantes.length < 2) {
@@ -198,6 +205,13 @@ export default function Home() {
     }
   };
 
+  const marcarYaCantaron = (p: string[]) => {
+    setParticipanteRows((prev) => prev.map((r) => (p.includes(r.nombre) ? { ...r, ya_canto: true } : r)));
+    supabase.from('karaokey_participantes').update({ ya_canto: true }).in('nombre', p).then(({ error }) => {
+      if (error) console.error('[KaraoKey] Failed to save ya_canto:', error);
+    });
+  };
+
   const startStage = (p: string[], c: Cancion, challenge?: string) => {
     setSorteo({
       participantes: p,
@@ -205,19 +219,49 @@ export default function Home() {
       desafio: challenge || "¡A darlo todo!",
       id: Date.now().toString()
     });
-    setParticipanteRows((prev) => prev.map((r) => (p.includes(r.nombre) ? { ...r, ya_canto: true } : r)));
-    supabase.from('karaokey_participantes').update({ ya_canto: true }).in('nombre', p).then(({ error }) => {
-      if (error) console.error('[KaraoKey] Failed to save ya_canto:', error);
-    });
+    marcarYaCantaron(p);
     confetti.reset();
     setView('player');
     setShowWinnerModal(false);
+  };
+
+  // "Solo Cantante" mode: no song, no escenario — just reveal who's up next.
+  const revealCantante = (p: string[]) => {
+    setSorteoCantante(p);
+    marcarYaCantaron(p);
+    confetti({
+      particleCount: 150,
+      spread: 70,
+      origin: { y: 0.6 },
+      colors: ['#FF3B81', '#00B7ED', '#9D4EDD']
+    });
+    setView('cantante');
+  };
+
+  const pedirSorteoCantante = () => {
+    if (participantes.length === 0) return;
+    if (modoDuo && participantes.length < 2) {
+      toast("Necesitás al menos 2 participantes para el modo dúo", { type: 'error' });
+      return;
+    }
+
+    setGirando(true);
+    setTimeout(() => {
+      const shuffled = [...participantes].sort(() => Math.random() - 0.5);
+      const elegidos = shuffled.slice(0, modoDuo ? 2 : 1);
+      setGirando(false);
+      revealCantante(elegidos);
+    }, 3000);
   };
 
   const handleManualStart = () => {
     const requeridos = modoDuo ? 2 : 1;
     if (selectedParticipantes.length < requeridos) {
       toast(modoDuo ? "¡Faltan elegir los 2 cantantes!" : "¡Falta elegir quién canta!", { type: 'error' });
+      return;
+    }
+    if (modoSorteo === 'cantante') {
+      revealCantante(selectedParticipantes);
       return;
     }
     if (!selectedCancion) {
@@ -398,6 +442,15 @@ export default function Home() {
         <meta name="description" content="El sorteador de karaoke más premium para tus fiestas." />
       </Head>
 
+      {/* Opciones de Sorteo Button */}
+      <button
+        onClick={() => setShowOpcionesSorteo(true)}
+        className="fixed top-4 left-4 z-50 p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+        title="Opciones de Sorteo"
+      >
+        <Settings2 size={20} className="text-white/60" />
+      </button>
+
       {/* Settings Button */}
       <button
         onClick={() => setShowSettings(true)}
@@ -406,6 +459,79 @@ export default function Home() {
       >
         <Users size={20} className="text-white/60" />
       </button>
+
+      {/* Opciones de Sorteo Modal */}
+      <AnimatePresence>
+        {showOpcionesSorteo && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4"
+            onClick={() => setShowOpcionesSorteo(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-[#121212] border border-white/10 rounded-3xl p-6 max-w-lg w-full space-y-6"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="text-2xl font-bold text-white mb-4">Opciones de Sorteo</h3>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <p className="text-sm text-white/60">Tipo de sorteo:</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => setModoSorteo('completo')}
+                      className={`p-4 rounded-xl border text-center transition-all ${modoSorteo === 'completo'
+                        ? 'bg-neon-pink/20 border-neon-pink text-white shadow-[0_0_15px_rgba(255,59,129,0.3)]'
+                        : 'bg-white/5 border-white/10 text-white/50 hover:border-white/20'
+                        }`}
+                    >
+                      <Music size={20} className="mx-auto mb-2" />
+                      <span className="text-xs font-bold uppercase tracking-widest">Cantante + Canción</span>
+                    </button>
+                    <button
+                      onClick={() => setModoSorteo('cantante')}
+                      className={`p-4 rounded-xl border text-center transition-all ${modoSorteo === 'cantante'
+                        ? 'bg-neon-pink/20 border-neon-pink text-white shadow-[0_0_15px_rgba(255,59,129,0.3)]'
+                        : 'bg-white/5 border-white/10 text-white/50 hover:border-white/20'
+                        }`}
+                    >
+                      <Mic2 size={20} className="mx-auto mb-2" />
+                      <span className="text-xs font-bold uppercase tracking-widest">Solo Cantante</span>
+                    </button>
+                  </div>
+                  <p className="text-xs text-white/40">
+                    {modoSorteo === 'completo'
+                      ? 'Sortea quién canta y qué canción, y va al escenario con el reproductor.'
+                      : 'Solo sortea quién canta — se muestra el nombre en pantalla, sin canción ni reproductor.'}
+                  </p>
+                </div>
+
+                <div className="pt-4 border-t border-white/10">
+                  <button
+                    onClick={toggleModoDuo}
+                    className="w-full flex items-center justify-between gap-3 p-4 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 transition-all"
+                  >
+                    <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-white/70">
+                      <Users2 size={16} /> Modo Dúo
+                    </span>
+                    <span className={`relative w-9 h-5 rounded-full transition-colors ${modoDuo ? 'bg-neon-blue' : 'bg-white/15'}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${modoDuo ? 'translate-x-4' : ''}`} />
+                    </span>
+                  </button>
+                  <p className="text-xs text-white/40 pt-2">
+                    {modoDuo ? 'Sortea de a 2 personas por vez.' : 'Sortea de a 1 persona por vez.'}
+                  </p>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Settings Modal */}
       <AnimatePresence>
@@ -532,16 +658,13 @@ export default function Home() {
               </p>
 
               <button
-                onClick={toggleModoDuo}
-                className={`inline-flex items-center gap-3 px-4 py-2 rounded-full border transition-all ${modoDuo
-                  ? 'bg-neon-blue/20 border-neon-blue text-white shadow-[0_0_15px_rgba(0,183,237,0.3)]'
-                  : 'bg-white/5 border-white/10 text-white/50 hover:border-white/20'
-                  }`}
+                onClick={() => setShowOpcionesSorteo(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-white/10 bg-white/5 hover:border-white/20 transition-all text-white/50 hover:text-white/80"
+                title="Opciones de Sorteo"
               >
-                <Users2 size={16} />
-                <span className="text-xs font-bold uppercase tracking-widest">Modo Dúo</span>
-                <span className={`relative w-9 h-5 rounded-full transition-colors ${modoDuo ? 'bg-neon-blue' : 'bg-white/15'}`}>
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${modoDuo ? 'translate-x-4' : ''}`} />
+                <Settings2 size={14} />
+                <span className="text-xs font-bold uppercase tracking-widest">
+                  {modoSorteo === 'completo' ? 'Cantante + Canción' : 'Solo Cantante'} · {modoDuo ? 'Dúo' : 'Solo'}
                 </span>
               </button>
             </header>
@@ -592,13 +715,13 @@ export default function Home() {
                 <div className="absolute -top-12 w-full flex justify-center z-10">
                   <button
                     onClick={handleManualStart}
-                    className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && selectedCancion
+                    className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && (modoSorteo === 'cantante' || selectedCancion)
                       ? 'bg-green-500 text-white shadow-lg hover:scale-105'
                       : 'bg-white/5 text-white/30 cursor-not-allowed'
                       }`}
-                    disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || !selectedCancion}
+                    disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || (modoSorteo === 'completo' && !selectedCancion)}
                   >
-                    Ir al Escenario (Manual)
+                    {modoSorteo === 'completo' ? 'Ir al Escenario (Manual)' : 'Mostrar Cantante (Manual)'}
                   </button>
                 </div>
 
@@ -614,15 +737,17 @@ export default function Home() {
                         <SlotMachine items={participantes} isSpinning={girando} result={sorteo?.participantes.join(' & ') || null} color="330 100% 60%" />
                       </div>
 
-                      <div className="space-y-2">
-                        <label className="text-xs uppercase tracking-widest opacity-50 font-bold">Canción</label>
-                        <SlotMachine items={canciones.map(c => c.titulo)} isSpinning={girando} result={sorteo?.cancion.titulo || null} color="195 100% 45%" />
-                      </div>
+                      {modoSorteo === 'completo' && (
+                        <div className="space-y-2">
+                          <label className="text-xs uppercase tracking-widest opacity-50 font-bold">Canción</label>
+                          <SlotMachine items={canciones.map(c => c.titulo)} isSpinning={girando} result={sorteo?.cancion.titulo || null} color="195 100% 45%" />
+                        </div>
+                      )}
                     </div>
 
                     <div className="h-24 flex flex-col justify-center">
                       <AnimatePresence mode="wait">
-                        {sorteo && !girando ? (
+                        {modoSorteo === 'completo' && sorteo && !girando ? (
                           <motion.div
                             key="result"
                             initial={{ scale: 0.9, opacity: 0 }}
@@ -641,15 +766,17 @@ export default function Home() {
                             animate={{ opacity: 1 }}
                             className="text-center text-white/20 text-sm italic"
                           >
-                            {girando ? "Buscando el hit perfecto..." : "¡Dale play al sorteo!"}
+                            {girando
+                              ? (modoSorteo === 'completo' ? "Buscando el hit perfecto..." : "Eligiendo quién sigue...")
+                              : "¡Dale play al sorteo!"}
                           </motion.div>
                         )}
                       </AnimatePresence>
                     </div>
 
                     <button
-                      onClick={pedirSorteo}
-                      disabled={girando || participantes.length === 0 || canciones.length === 0}
+                      onClick={() => modoSorteo === 'completo' ? pedirSorteo() : pedirSorteoCantante()}
+                      disabled={girando || participantes.length === 0 || (modoSorteo === 'completo' && canciones.length === 0)}
                       className="w-full py-4 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
                     >
                       {girando ? (
@@ -769,6 +896,39 @@ export default function Home() {
               </p>
             </footer>
           </motion.main>
+        ) : view === 'cantante' ? (
+          <motion.div
+            key="cantante"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }}
+            className="min-h-screen flex flex-col items-center justify-center gap-10 text-center px-4"
+          >
+            <Mic2 size={72} className="text-neon-pink drop-shadow-lg" />
+            <div className="space-y-3">
+              <p className="text-white/50 uppercase tracking-widest text-sm font-bold">
+                {sorteoCantante && sorteoCantante.length > 1 ? '¡Les toca cantar a!' : '¡Le toca cantar a!'}
+              </p>
+              <h1 className="text-6xl md:text-8xl font-black italic tracking-tighter text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] via-[#9D4EDD] to-[#00B7ED]">
+                {sorteoCantante?.join(' & ')}
+              </h1>
+            </div>
+            <div className="flex flex-wrap gap-4 justify-center pt-8">
+              <button
+                onClick={() => setView('setup')}
+                className="px-6 py-3 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer group"
+              >
+                <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" /> Menú Principal
+              </button>
+              <button
+                onClick={pedirSorteoCantante}
+                disabled={girando}
+                className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw size={18} className={girando ? "animate-spin" : "animate-[spin_4s_linear_infinite]"} /> Siguiente Sorteo
+              </button>
+            </div>
+          </motion.div>
         ) : (
           <KaraokePlayer
             key={sorteo!.id}
