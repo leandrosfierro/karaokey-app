@@ -25,6 +25,28 @@ interface VideoResult {
 // is dominated by karaoke channels, so the raw top result is often karaoke again.
 const KARAOKE_LIKE_TITLE = /karaoke|instrumental|solo\s*pista|sin\s*voz|backing\s*track|videoke|midi/i;
 
+function normalizeTitle(s: string): string {
+    return s
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Lower is better: prefer results whose title actually names the song (an artist's
+// channel can surface unrelated songs, full albums, or "greatest hits" compilations
+// that mention neither the song nor "karaoke") and that aren't karaoke uploads.
+function scoreOriginalCandidate(videoTitle: string, songTitle: string): number {
+    const normalizedSong = normalizeTitle(songTitle);
+    const matchesSong = normalizedSong.length > 0 && normalizeTitle(videoTitle).includes(normalizedSong);
+    const looksKaraoke = KARAOKE_LIKE_TITLE.test(videoTitle);
+    if (matchesSong && !looksKaraoke) return 0;
+    if (matchesSong && looksKaraoke) return 1;
+    if (!matchesSong && !looksKaraoke) return 2;
+    return 3;
+}
+
 declare global {
     interface Window {
         onYouTubeIframeAPIReady: () => void;
@@ -155,15 +177,22 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         title: item.snippet.title,
                         thumbnail: item.snippet.thumbnails.medium.url
                     }));
-                    setOriginalAlternatives(oResults);
 
-                    // Skip karaoke/instrumental-looking uploads — pick the first clean match
-                    const clean = oResults.find((v) => !KARAOKE_LIKE_TITLE.test(v.title));
-                    setOriginalVideoId((clean ?? oResults[0]).id);
-                    console.log('[KaraoKey] Original video selected:', (clean ?? oResults[0]).id, clean ? '' : '(no clean match, using top result)');
+                    // Rank by: actually names the song & isn't karaoke (best) → names the
+                    // song but is karaoke → neither names it nor is karaoke → worst case.
+                    // An artist's own channel can just as easily surface an unrelated
+                    // single, a full album, or a "greatest hits" compilation.
+                    const ranked = oResults
+                        .map((v, i) => ({ v, score: scoreOriginalCandidate(v.title, song.titulo), i }))
+                        .sort((a, b) => a.score - b.score || a.i - b.i)
+                        .map((r) => r.v);
 
-                    if (!clean) {
-                        toast('No encontramos una versión claramente original (sin karaoke). Elegí una manualmente en "Voz Original" si hace falta.', { type: 'info', duration: 6000 });
+                    setOriginalAlternatives(ranked);
+                    setOriginalVideoId(ranked[0].id);
+                    console.log('[KaraoKey] Original video selected:', ranked[0].id, ranked[0].title);
+
+                    if (scoreOriginalCandidate(ranked[0].title, song.titulo) > 0) {
+                        toast(`No encontramos con certeza la versión original de "${song.titulo}". Elegí una manualmente en "Voz Original" si hace falta.`, { type: 'info', duration: 6000 });
                     }
                 } else {
                     console.warn('[KaraoKey] No original results found');
