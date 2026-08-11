@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Image from 'next/image';
 import screenfull from 'screenfull';
-import { Maximize2, Minimize2, ArrowLeft, RefreshCw, ListMusic, Trophy, Mic2, Music, Volume2, Settings2 } from 'lucide-react';
+import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Settings2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
 
@@ -20,6 +20,11 @@ interface VideoResult {
     thumbnail: string;
 }
 
+// Titles that give away a karaoke/instrumental upload, used to keep those out of the
+// "original version" pick — YouTube search for regional genres (cuarteto, cumbia, etc.)
+// is dominated by karaoke channels, so the raw top result is often karaoke again.
+const KARAOKE_LIKE_TITLE = /karaoke|instrumental|solo\s*pista|sin\s*voz|backing\s*track|videoke|midi/i;
+
 declare global {
     interface Window {
         onYouTubeIframeAPIReady: () => void;
@@ -33,6 +38,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const [karaokeVideoId, setKaraokeVideoId] = useState<string | null>(null);
     const [alternatives, setAlternatives] = useState<VideoResult[]>([]);
     const [originalVideoId, setOriginalVideoId] = useState<string | null>(null);
+    const [originalAlternatives, setOriginalAlternatives] = useState<VideoResult[]>([]);
     const [loading, setLoading] = useState(true);
     const playerContainerRef = useRef<HTMLDivElement>(null);
     const hasFetched = useRef(false);
@@ -133,8 +139,10 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     console.warn('[KaraoKey] No karaoke results found');
                 }
 
-                // 2. Original Search
-                const oQuery = `${song.titulo} ${song.artista || ''} official video`;
+                // 2. Original Search — dropping the literal "official video" qualifier:
+                // for regional genres (cuarteto, cumbia, etc.) most uploads aren't tagged
+                // in English, so the plain title+artist search matches better in practice.
+                const oQuery = `${song.titulo} ${song.artista || ''}`.trim();
                 console.log('[KaraoKey] Original query:', oQuery);
 
                 const oRes = await fetch(`/api/youtube?q=${encodeURIComponent(oQuery)}`);
@@ -142,8 +150,21 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 console.log('[KaraoKey] Original results:', oData);
 
                 if (oData.items && oData.items.length > 0) {
-                    setOriginalVideoId(oData.items[0].id.videoId);
-                    console.log('[KaraoKey] Original video selected:', oData.items[0].id.videoId);
+                    const oResults: VideoResult[] = oData.items.map((item: any) => ({
+                        id: item.id.videoId,
+                        title: item.snippet.title,
+                        thumbnail: item.snippet.thumbnails.medium.url
+                    }));
+                    setOriginalAlternatives(oResults);
+
+                    // Skip karaoke/instrumental-looking uploads — pick the first clean match
+                    const clean = oResults.find((v) => !KARAOKE_LIKE_TITLE.test(v.title));
+                    setOriginalVideoId((clean ?? oResults[0]).id);
+                    console.log('[KaraoKey] Original video selected:', (clean ?? oResults[0]).id, clean ? '' : '(no clean match, using top result)');
+
+                    if (!clean) {
+                        toast('No encontramos una versión claramente original (sin karaoke). Elegí una manualmente en "Voz Original" si hace falta.', { type: 'info', duration: 6000 });
+                    }
                 } else {
                     console.warn('[KaraoKey] No original results found');
                 }
@@ -231,8 +252,27 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 },
                 events: {
                     'onReady': (event: any) => {
-                        event.target.mute();
-                        event.target.setVolume(0);
+                        // Apply current crossfader position (read from ref: always current,
+                        // no re-init on crossfader moves) instead of always muting — otherwise
+                        // switching to a different "Voz Original" pick mid-song goes silent.
+                        const vol = Math.floor(assistLevelRef.current * 100);
+                        event.target.setVolume(vol);
+                        if (vol > 0) event.target.unMute();
+                        else event.target.mute();
+
+                        // Align to the karaoke track's current position/state — covers
+                        // picking a different "Voz Original" alternative mid-performance.
+                        if (masterPlayer.current && typeof masterPlayer.current.getCurrentTime === 'function') {
+                            const masterTime = masterPlayer.current.getCurrentTime();
+                            const targetTime = Math.max(0, masterTime + syncOffsetRef.current);
+                            event.target.seekTo(targetTime, true);
+
+                            if (masterPlayer.current.getPlayerState && masterPlayer.current.getPlayerState() === 1) {
+                                event.target.playVideo();
+                            } else {
+                                event.target.pauseVideo();
+                            }
+                        }
                     }
                 }
             });
@@ -497,46 +537,83 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     </div>
                 </div>
 
-                <div className="space-y-4">
-                    <div className="flex items-center gap-2 text-white/60 font-bold uppercase text-xs tracking-widest">
-                        <ListMusic size={16} /> Opciones Sugeridas
-                    </div>
-
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
-                        {alternatives.map((video) => (
-                            <button
-                                key={video.id}
-                                onClick={() => setKaraokeVideoId(video.id)}
-                                className={`w-full group text-left space-y-2 p-3 rounded-2xl transition-all border cursor-pointer hover:shadow-lg ${karaokeVideoId === video.id
-                                    ? 'bg-neon-pink/10 border-neon-pink/40 shadow-lg shadow-[#FF3B81]/10'
-                                    : 'bg-white/5 border-white/5 hover:border-white/10 hover:bg-white/10'
-                                    }`}
-                            >
-                                <div className="relative aspect-video rounded-xl overflow-hidden pointer-events-none group-hover:scale-[1.02] transition-transform">
-                                    <Image
-                                        src={video.thumbnail}
-                                        alt={video.title}
-                                        fill
-                                        sizes="(min-width: 1024px) 300px, 100vw"
-                                        className="object-cover"
-                                        unoptimized
-                                    />
-                                    {karaokeVideoId === video.id && (
-                                        <div className="absolute top-2 right-2 bg-neon-pink text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-lg">
-                                            ACTUAL
-                                        </div>
-                                    )}
-                                </div>
-                                <div className="px-1 pointer-events-none">
-                                    <p className={`text-xs font-bold line-clamp-2 ${karaokeVideoId === video.id ? 'text-white' : 'text-white/70'}`}>
-                                        {video.title}
-                                    </p>
-                                </div>
-                            </button>
-                        ))}
-                    </div>
+                <div className="space-y-6">
+                    <VideoOptionsList
+                        label="Pista Karaoke"
+                        icon={<Mic2 size={16} />}
+                        videos={alternatives}
+                        selectedId={karaokeVideoId}
+                        onSelect={setKaraokeVideoId}
+                        accent="pink"
+                    />
+                    <VideoOptionsList
+                        label="Voz Original"
+                        icon={<Music size={16} />}
+                        videos={originalAlternatives}
+                        selectedId={originalVideoId}
+                        onSelect={setOriginalVideoId}
+                        accent="blue"
+                    />
                 </div>
             </div>
         </motion.div>
     );
 };
+
+interface VideoOptionsListProps {
+    label: string;
+    icon: React.ReactNode;
+    videos: VideoResult[];
+    selectedId: string | null;
+    onSelect: (id: string) => void;
+    accent: 'pink' | 'blue';
+}
+
+function VideoOptionsList({ label, icon, videos, selectedId, onSelect, accent }: VideoOptionsListProps) {
+    if (videos.length === 0) return null;
+
+    const accentClasses = accent === 'pink'
+        ? { selected: 'bg-neon-pink/10 border-neon-pink/40 shadow-lg shadow-[#FF3B81]/10', badge: 'bg-neon-pink' }
+        : { selected: 'bg-neon-blue/10 border-neon-blue/40 shadow-lg shadow-[#00B7ED]/10', badge: 'bg-neon-blue' };
+
+    return (
+        <div className="space-y-3">
+            <div className="flex items-center gap-2 text-white/60 font-bold uppercase text-xs tracking-widest">
+                {icon} {label}
+            </div>
+            <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                {videos.map((video) => (
+                    <button
+                        key={video.id}
+                        onClick={() => onSelect(video.id)}
+                        className={`w-full group text-left space-y-2 p-3 rounded-2xl transition-all border cursor-pointer hover:shadow-lg ${selectedId === video.id
+                            ? accentClasses.selected
+                            : 'bg-white/5 border-white/5 hover:border-white/10 hover:bg-white/10'
+                            }`}
+                    >
+                        <div className="relative aspect-video rounded-xl overflow-hidden pointer-events-none group-hover:scale-[1.02] transition-transform">
+                            <Image
+                                src={video.thumbnail}
+                                alt={video.title}
+                                fill
+                                sizes="(min-width: 1024px) 300px, 100vw"
+                                className="object-cover"
+                                unoptimized
+                            />
+                            {selectedId === video.id && (
+                                <div className={`absolute top-2 right-2 ${accentClasses.badge} text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-lg`}>
+                                    ACTUAL
+                                </div>
+                            )}
+                        </div>
+                        <div className="px-1 pointer-events-none">
+                            <p className={`text-xs font-bold line-clamp-2 ${selectedId === video.id ? 'text-white' : 'text-white/70'}`}>
+                                {video.title}
+                            </p>
+                        </div>
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
