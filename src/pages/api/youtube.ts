@@ -53,12 +53,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
         if (!response.ok) {
             console.error('[YouTube API] Google API Error:', data.error);
+            const errorReason = data.error?.errors?.[0]?.reason;
+            const isQuotaExceeded = response.status === 429 || errorReason === 'rateLimitExceeded' || errorReason === 'quotaExceeded';
             return res.status(response.status).json({
                 error: data.error?.message || 'Error en la API de YouTube',
                 details: data.error,
-                suggestion: data.error?.code === 403
-                    ? 'Verifica que la YouTube Data API v3 esté habilitada en Google Cloud Console'
-                    : 'Verifica tu API key en las variables de entorno de Vercel'
+                reason: isQuotaExceeded ? 'quota_exceeded' : undefined,
+                suggestion: isQuotaExceeded
+                    ? 'Se agotó la cuota diaria gratuita de la YouTube Data API. Vuelve a estar disponible al otro día, o se puede pedir un aumento en Google Cloud Console.'
+                    : data.error?.code === 403
+                        ? 'Verifica que la YouTube Data API v3 esté habilitada en Google Cloud Console'
+                        : 'Verifica tu API key en las variables de entorno de Vercel'
             });
         }
 

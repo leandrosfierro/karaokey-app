@@ -4,6 +4,7 @@ import screenfull from 'screenfull';
 import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Settings2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
+import { supabase } from '../lib/supabase';
 
 // NATIVE YOUTUBE API IMPLEMENTATION (Dual Player)
 
@@ -24,6 +25,17 @@ interface VideoResult {
 // "original version" pick — YouTube search for regional genres (cuarteto, cumbia, etc.)
 // is dominated by karaoke channels, so the raw top result is often karaoke again.
 const KARAOKE_LIKE_TITLE = /karaoke|instrumental|solo\s*pista|sin\s*voz|backing\s*track|videoke|midi/i;
+
+// Stable per-song lookup key for the video cache — same song should hit the
+// same cache row regardless of accents/casing/whitespace differences.
+function cancionCacheKey(titulo: string, artista?: string): string {
+    return `${titulo}|${artista || ''}`
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9|]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
 function normalizeTitle(s: string): string {
     return s
@@ -129,7 +141,26 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             if (hasFetched.current) return;
             hasFetched.current = true;
 
+            const cacheKey = cancionCacheKey(song.titulo, song.artista);
             console.log('[KaraoKey] Fetching videos for:', song.titulo, song.artista);
+
+            // Check the cache first — repeat songs (very likely across a party, or the
+            // next one) don't burn any YouTube search quota at all.
+            const { data: cached } = await supabase
+                .from('karaokey_video_cache')
+                .select('*')
+                .eq('cancion_key', cacheKey)
+                .maybeSingle();
+
+            if (cached) {
+                console.log('[KaraoKey] Cache hit for', cacheKey);
+                setAlternatives(cached.karaoke_alternatives ?? []);
+                setKaraokeVideoId(cached.karaoke_video_id ?? null);
+                setOriginalAlternatives(cached.original_alternatives ?? []);
+                setOriginalVideoId(cached.original_video_id ?? null);
+                setLoading(false);
+                return;
+            }
 
             try {
                 // 1. Karaoke Search
@@ -137,26 +168,25 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 console.log('[KaraoKey] Karaoke query:', kQuery);
 
                 const kRes = await fetch(`/api/youtube?q=${encodeURIComponent(kQuery)}`);
+                const kData = await kRes.json();
 
                 if (!kRes.ok) {
-                    console.error('[KaraoKey] API Error:', kRes.status, kRes.statusText);
-                    const errorText = await kRes.text();
-                    console.error('[KaraoKey] Error details:', errorText);
-                    throw new Error(`YouTube API failed: ${kRes.status}`);
+                    console.error('[KaraoKey] API Error:', kRes.status, kData);
+                    throw new Error(kData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${kRes.status}`);
                 }
 
-                const kData = await kRes.json();
                 console.log('[KaraoKey] Karaoke results:', kData);
 
+                let karaokeResults: VideoResult[] = [];
                 if (kData.items && kData.items.length > 0) {
-                    const results: VideoResult[] = kData.items.map((item: any) => ({
+                    karaokeResults = kData.items.map((item: any) => ({
                         id: item.id.videoId,
                         title: item.snippet.title,
                         thumbnail: item.snippet.thumbnails.medium.url
                     }));
-                    setAlternatives(results);
-                    setKaraokeVideoId(results[0].id);
-                    console.log('[KaraoKey] Karaoke video selected:', results[0].id);
+                    setAlternatives(karaokeResults);
+                    setKaraokeVideoId(karaokeResults[0].id);
+                    console.log('[KaraoKey] Karaoke video selected:', karaokeResults[0].id);
                 } else {
                     console.warn('[KaraoKey] No karaoke results found');
                 }
@@ -169,8 +199,15 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
 
                 const oRes = await fetch(`/api/youtube?q=${encodeURIComponent(oQuery)}`);
                 const oData = await oRes.json();
+
+                if (!oRes.ok) {
+                    console.error('[KaraoKey] API Error:', oRes.status, oData);
+                    throw new Error(oData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${oRes.status}`);
+                }
+
                 console.log('[KaraoKey] Original results:', oData);
 
+                let rankedOriginal: VideoResult[] = [];
                 if (oData.items && oData.items.length > 0) {
                     const oResults: VideoResult[] = oData.items.map((item: any) => ({
                         id: item.id.videoId,
@@ -182,25 +219,40 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     // song but is karaoke → neither names it nor is karaoke → worst case.
                     // An artist's own channel can just as easily surface an unrelated
                     // single, a full album, or a "greatest hits" compilation.
-                    const ranked = oResults
+                    rankedOriginal = oResults
                         .map((v, i) => ({ v, score: scoreOriginalCandidate(v.title, song.titulo), i }))
                         .sort((a, b) => a.score - b.score || a.i - b.i)
                         .map((r) => r.v);
 
-                    setOriginalAlternatives(ranked);
-                    setOriginalVideoId(ranked[0].id);
-                    console.log('[KaraoKey] Original video selected:', ranked[0].id, ranked[0].title);
+                    setOriginalAlternatives(rankedOriginal);
+                    setOriginalVideoId(rankedOriginal[0].id);
+                    console.log('[KaraoKey] Original video selected:', rankedOriginal[0].id, rankedOriginal[0].title);
 
-                    if (scoreOriginalCandidate(ranked[0].title, song.titulo) > 0) {
+                    if (scoreOriginalCandidate(rankedOriginal[0].title, song.titulo) > 0) {
                         toast(`No encontramos con certeza la versión original de "${song.titulo}". Elegí una manualmente en "Voz Original" si hace falta.`, { type: 'info', duration: 6000 });
                     }
                 } else {
                     console.warn('[KaraoKey] No original results found');
                 }
 
+                // Cache for next time this song comes up (fire and forget)
+                supabase.from('karaokey_video_cache').upsert({
+                    cancion_key: cacheKey,
+                    karaoke_video_id: karaokeResults[0]?.id ?? null,
+                    karaoke_alternatives: karaokeResults,
+                    original_video_id: rankedOriginal[0]?.id ?? null,
+                    original_alternatives: rankedOriginal,
+                }, { onConflict: 'cancion_key' }).then(({ error }) => {
+                    if (error) console.error('[KaraoKey] Failed to cache video search:', error);
+                });
+
             } catch (error) {
                 console.error("[KaraoKey] CRITICAL Error fetching videos:", error);
-                toast('Error al buscar videos. Verifica la consola del navegador y la configuración de la YouTube API Key.', { type: 'error', duration: 6000 });
+                if (error instanceof Error && error.message === 'quota_exceeded') {
+                    toast('Se agotó la cuota diaria gratuita de búsquedas de YouTube. Va a volver a funcionar mañana.', { type: 'error', duration: 8000 });
+                } else {
+                    toast('Error al buscar videos. Verifica la consola del navegador y la configuración de la YouTube API Key.', { type: 'error', duration: 6000 });
+                }
             } finally {
                 setLoading(false);
                 console.log('[KaraoKey] Fetch completed. Loading:', false);
