@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
 import { useToast } from "../components/Toast";
-import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow } from "../lib/supabase";
+import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow } from "../lib/supabase";
 
 type Cancion = { titulo: string; artista?: string };
 
@@ -60,6 +60,7 @@ export default function Home() {
   // yaCantaron) is derived from these on every render.
   const [participanteRows, setParticipanteRows] = useState<ParticipanteRow[]>([]);
   const [cancionRows, setCancionRows] = useState<CancionRow[]>([]);
+  const [colaRows, setColaRows] = useState<ColaTurnoRow[]>([]);
   const participantes = participanteRows.map((r) => r.nombre);
   const canciones: Cancion[] = cancionRows.map((r) => ({ titulo: r.titulo, artista: r.artista ?? undefined }));
   const yaCantaron = participanteRows.filter((r) => r.ya_canto).map((r) => r.nombre);
@@ -77,6 +78,7 @@ export default function Home() {
   const [showOpcionesSorteo, setShowOpcionesSorteo] = useState(false);
   const [modoDuo, setModoDuo] = useState(false);
   const [modoSorteo, setModoSorteo] = useState<ModoSorteo>('completo');
+  const [modoTurnos, setModoTurnos] = useState(false);
 
   // Load from Supabase and seed defaults on a brand-new, empty database.
   // modoDuo is just a session preference, not content worth a DB round-trip,
@@ -93,10 +95,14 @@ export default function Home() {
 
     let cancelled = false;
     (async () => {
-      const [{ data: pData, error: pErr }, { data: cData, error: cErr }] = await Promise.all([
+      const [{ data: pData, error: pErr }, { data: cData, error: cErr }, { data: colaData, error: colaErr }] = await Promise.all([
         supabase.from('karaokey_participantes').select('*').order('created_at', { ascending: true }),
         supabase.from('karaokey_canciones').select('*').order('created_at', { ascending: true }),
+        supabase.from('karaokey_cola_turnos').select('*').order('created_at', { ascending: true }),
       ]);
+
+      if (colaErr) console.error('[KaraoKey] Failed to load cola de turnos:', colaErr);
+      else setColaRows(colaData ?? []);
 
       if (cancelled) return;
 
@@ -129,6 +135,8 @@ export default function Home() {
       if (savedDuo) setModoDuo(JSON.parse(savedDuo));
       const savedModoSorteo = localStorage.getItem("karaokey-modo-sorteo");
       if (savedModoSorteo === 'completo' || savedModoSorteo === 'cantante') setModoSorteo(savedModoSorteo);
+      const savedModoTurnos = localStorage.getItem("karaokey-modo-turnos");
+      if (savedModoTurnos) setModoTurnos(JSON.parse(savedModoTurnos));
       setMounted(true);
     })();
     return () => { cancelled = true; };
@@ -139,8 +147,9 @@ export default function Home() {
     if (mounted) {
       localStorage.setItem("karaokey-modo-duo", JSON.stringify(modoDuo));
       localStorage.setItem("karaokey-modo-sorteo", modoSorteo);
+      localStorage.setItem("karaokey-modo-turnos", JSON.stringify(modoTurnos));
     }
-  }, [modoDuo, modoSorteo, mounted]);
+  }, [modoDuo, modoSorteo, modoTurnos, mounted]);
 
   const toggleModoDuo = () => {
     if (!modoDuo && participantes.length < 2) {
@@ -252,6 +261,75 @@ export default function Home() {
       setGirando(false);
       revealCantante(elegidos);
     }, 3000);
+  };
+
+  // "Cola de Turnos" mode — a manually-ordered queue as an alternative to the
+  // random draw above. Reuses startStage/revealCantante/marcarYaCantaron so
+  // modoTurnos only decides *how* the next {participant, song} pair is picked;
+  // modoSorteo still decides what happens once it is.
+  const addTurno = async (nombre: string, cancion: Cancion) => {
+    const trimmed = nombre.trim();
+    if (!trimmed || !cancion.titulo.trim()) return;
+    const { data, error } = await supabase
+      .from('karaokey_cola_turnos')
+      .insert({ nombre: trimmed, cancion_titulo: cancion.titulo, cancion_artista: cancion.artista ?? null })
+      .select()
+      .single();
+    if (error || !data) {
+      toast('No se pudo guardar el turno.', { type: 'error' });
+      return;
+    }
+    setColaRows((prev) => [...prev, data]);
+  };
+
+  const removeTurno = (index: number) => {
+    const removed = colaRows[index];
+    setColaRows((prev) => prev.filter((_, i) => i !== index));
+    supabase.from('karaokey_cola_turnos').delete().eq('id', removed.id).then(({ error }) => {
+      if (error) toast('Error al eliminar de la base de datos.', { type: 'error' });
+    });
+    toast(`Turno de ${removed.nombre} eliminado`, {
+      action: {
+        label: 'Deshacer',
+        onClick: async () => {
+          const { data } = await supabase.from('karaokey_cola_turnos').insert(removed).select().single();
+          if (data) setColaRows((prev) => { const copy = [...prev]; copy.splice(index, 0, data); return copy; });
+        }
+      }
+    });
+  };
+
+  const limpiarCantados = async () => {
+    setColaRows((prev) => prev.filter((r) => !r.ya_canto));
+    const { error } = await supabase.from('karaokey_cola_turnos').delete().eq('ya_canto', true);
+    if (error) toast('Error al limpiar en la base de datos.', { type: 'error' });
+  };
+
+  const vaciarCola = async () => {
+    if (colaRows.length === 0) return;
+    if (!window.confirm('¿Vaciar toda la cola de turnos?')) return;
+    setColaRows([]);
+    const { error } = await supabase.from('karaokey_cola_turnos').delete().not('id', 'is', null);
+    if (error) toast('Error al vaciar en la base de datos.', { type: 'error' });
+  };
+
+  const siguienteTurno = () => {
+    const pendientes = colaRows.filter((r) => !r.ya_canto);
+    if (pendientes.length === 0) {
+      toast('No hay nadie más en la cola', { type: 'error' });
+      return;
+    }
+    const next = pendientes[0];
+    setColaRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ya_canto: true } : r)));
+    supabase.from('karaokey_cola_turnos').update({ ya_canto: true }).eq('id', next.id).then(({ error }) => {
+      if (error) console.error('[KaraoKey] Failed to save turno ya_canto:', error);
+    });
+
+    if (modoSorteo === 'cantante') {
+      revealCantante([next.nombre]);
+    } else {
+      startStage([next.nombre], { titulo: next.cancion_titulo, artista: next.cancion_artista ?? undefined });
+    }
   };
 
   const handleManualStart = () => {
@@ -527,6 +605,23 @@ export default function Home() {
                     {modoDuo ? 'Sortea de a 2 personas por vez.' : 'Sortea de a 1 persona por vez.'}
                   </p>
                 </div>
+
+                <div className="pt-4 border-t border-white/10">
+                  <button
+                    onClick={() => setModoTurnos((prev) => !prev)}
+                    className="w-full flex items-center justify-between gap-3 p-4 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 transition-all"
+                  >
+                    <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-white/70">
+                      <ListOrdered size={16} /> Cola de Turnos
+                    </span>
+                    <span className={`relative w-9 h-5 rounded-full transition-colors ${modoTurnos ? 'bg-neon-blue' : 'bg-white/15'}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${modoTurnos ? 'translate-x-4' : ''}`} />
+                    </span>
+                  </button>
+                  <p className="text-xs text-white/40 pt-2">
+                    {modoTurnos ? 'Armá la cola vos mismo: nombre + canción, y andá pasando turnos.' : 'Sortea al azar entre todos los participantes.'}
+                  </p>
+                </div>
               </div>
             </motion.div>
           </motion.div>
@@ -711,87 +806,101 @@ export default function Home() {
               </div>
 
               <div className="space-y-4 flex flex-col justify-center relative">
-                {/* Manual Play Button Overlay */}
-                <div className="absolute -top-12 w-full flex justify-center z-10">
-                  <button
-                    onClick={handleManualStart}
-                    className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && (modoSorteo === 'cantante' || selectedCancion)
-                      ? 'bg-green-500 text-white shadow-lg hover:scale-105'
-                      : 'bg-white/5 text-white/30 cursor-not-allowed'
-                      }`}
-                    disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || (modoSorteo === 'completo' && !selectedCancion)}
-                  >
-                    {modoSorteo === 'completo' ? 'Ir al Escenario (Manual)' : 'Mostrar Cantante (Manual)'}
-                  </button>
-                </div>
+                {modoTurnos ? (
+                  <ColaTurnosPanel
+                    colaRows={colaRows}
+                    canciones={canciones}
+                    onAdd={addTurno}
+                    onRemove={removeTurno}
+                    onSiguienteTurno={siguienteTurno}
+                    onLimpiarCantados={limpiarCantados}
+                    onVaciarCola={vaciarCola}
+                  />
+                ) : (
+                  <>
+                    {/* Manual Play Button Overlay */}
+                    <div className="absolute -top-12 w-full flex justify-center z-10">
+                      <button
+                        onClick={handleManualStart}
+                        className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && (modoSorteo === 'cantante' || selectedCancion)
+                          ? 'bg-green-500 text-white shadow-lg hover:scale-105'
+                          : 'bg-white/5 text-white/30 cursor-not-allowed'
+                          }`}
+                        disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || (modoSorteo === 'completo' && !selectedCancion)}
+                      >
+                        {modoSorteo === 'completo' ? 'Ir al Escenario (Manual)' : 'Mostrar Cantante (Manual)'}
+                      </button>
+                    </div>
 
-                <div className="glass-card rounded-3xl p-8 neon-border relative overflow-hidden bg-white/5 backdrop-blur-md border border-white/10">
-                  <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
-                    <Mic2 size={120} />
-                  </div>
-
-                  <div className="relative z-10 space-y-8">
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <label className="text-xs uppercase tracking-widest opacity-50 font-bold">{modoDuo ? 'Cantantes' : 'Cantante'}</label>
-                        <SlotMachine items={participantes} isSpinning={girando} result={sorteo?.participantes.join(' & ') || null} color="330 100% 60%" />
+                    <div className="glass-card rounded-3xl p-8 neon-border relative overflow-hidden bg-white/5 backdrop-blur-md border border-white/10">
+                      <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
+                        <Mic2 size={120} />
                       </div>
 
-                      {modoSorteo === 'completo' && (
-                        <div className="space-y-2">
-                          <label className="text-xs uppercase tracking-widest opacity-50 font-bold">Canción</label>
-                          <SlotMachine items={canciones.map(c => c.titulo)} isSpinning={girando} result={sorteo?.cancion.titulo || null} color="195 100% 45%" />
-                        </div>
-                      )}
-                    </div>
+                      <div className="relative z-10 space-y-8">
+                        <div className="space-y-6">
+                          <div className="space-y-2">
+                            <label className="text-xs uppercase tracking-widest opacity-50 font-bold">{modoDuo ? 'Cantantes' : 'Cantante'}</label>
+                            <SlotMachine items={participantes} isSpinning={girando} result={sorteo?.participantes.join(' & ') || null} color="330 100% 60%" />
+                          </div>
 
-                    <div className="h-24 flex flex-col justify-center">
-                      <AnimatePresence mode="wait">
-                        {modoSorteo === 'completo' && sorteo && !girando ? (
-                          <motion.div
-                            key="result"
-                            initial={{ scale: 0.9, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            className="bg-white/5 p-4 rounded-2xl border border-white/10 text-center space-y-2"
-                          >
-                            <div className="inline-flex items-center gap-2 text-yellow-400 font-bold uppercase text-[10px] tracking-widest">
-                              <Trophy size={12} /> Desafío Especial
+                          {modoSorteo === 'completo' && (
+                            <div className="space-y-2">
+                              <label className="text-xs uppercase tracking-widest opacity-50 font-bold">Canción</label>
+                              <SlotMachine items={canciones.map(c => c.titulo)} isSpinning={girando} result={sorteo?.cancion.titulo || null} color="195 100% 45%" />
                             </div>
-                            <p className="text-md font-medium italic">&ldquo;{sorteo.desafio}&rdquo;</p>
-                          </motion.div>
-                        ) : (
-                          <motion.div
-                            key="placeholder"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            className="text-center text-white/20 text-sm italic"
-                          >
-                            {girando
-                              ? (modoSorteo === 'completo' ? "Buscando el hit perfecto..." : "Eligiendo quién sigue...")
-                              : "¡Dale play al sorteo!"}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
+                          )}
+                        </div>
 
-                    <button
-                      onClick={() => modoSorteo === 'completo' ? pedirSorteo() : pedirSorteoCantante()}
-                      disabled={girando || participantes.length === 0 || (modoSorteo === 'completo' && canciones.length === 0)}
-                      className="w-full py-4 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
-                    >
-                      {girando ? (
-                        <>
-                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                          MEZCLANDO...
-                        </>
-                      ) : (
-                        <>
-                          <Play fill="currentColor" size={20} /> SORTEAR AHORA
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
+                        <div className="h-24 flex flex-col justify-center">
+                          <AnimatePresence mode="wait">
+                            {modoSorteo === 'completo' && sorteo && !girando ? (
+                              <motion.div
+                                key="result"
+                                initial={{ scale: 0.9, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                className="bg-white/5 p-4 rounded-2xl border border-white/10 text-center space-y-2"
+                              >
+                                <div className="inline-flex items-center gap-2 text-yellow-400 font-bold uppercase text-[10px] tracking-widest">
+                                  <Trophy size={12} /> Desafío Especial
+                                </div>
+                                <p className="text-md font-medium italic">&ldquo;{sorteo.desafio}&rdquo;</p>
+                              </motion.div>
+                            ) : (
+                              <motion.div
+                                key="placeholder"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="text-center text-white/20 text-sm italic"
+                              >
+                                {girando
+                                  ? (modoSorteo === 'completo' ? "Buscando el hit perfecto..." : "Eligiendo quién sigue...")
+                                  : "¡Dale play al sorteo!"}
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
+
+                        <button
+                          onClick={() => modoSorteo === 'completo' ? pedirSorteo() : pedirSorteoCantante()}
+                          disabled={girando || participantes.length === 0 || (modoSorteo === 'completo' && canciones.length === 0)}
+                          className="w-full py-4 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
+                        >
+                          {girando ? (
+                            <>
+                              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              MEZCLANDO...
+                            </>
+                          ) : (
+                            <>
+                              <Play fill="currentColor" size={20} /> SORTEAR AHORA
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="space-y-4">
@@ -921,11 +1030,11 @@ export default function Home() {
                 <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" /> Menú Principal
               </button>
               <button
-                onClick={pedirSorteoCantante}
+                onClick={() => modoTurnos ? siguienteTurno() : pedirSorteoCantante()}
                 disabled={girando}
                 className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer disabled:opacity-50"
               >
-                <RefreshCw size={18} className={girando ? "animate-spin" : "animate-[spin_4s_linear_infinite]"} /> Siguiente Sorteo
+                <RefreshCw size={18} className={girando ? "animate-spin" : "animate-[spin_4s_linear_infinite]"} /> {modoTurnos ? 'Siguiente Turno' : 'Siguiente Sorteo'}
               </button>
             </div>
           </motion.div>
@@ -937,7 +1046,7 @@ export default function Home() {
             onBack={() => setView('setup')}
             onNext={() => {
               setView('setup');
-              setTimeout(() => pedirSorteo(), 500);
+              setTimeout(() => modoTurnos ? siguienteTurno() : pedirSorteo(), 500);
             }}
           />
         )}
@@ -959,6 +1068,127 @@ export default function Home() {
           to { background-position: 200% center; }
         }
       `}</style>
+    </div>
+  );
+}
+
+interface ColaTurnosPanelProps {
+  colaRows: ColaTurnoRow[];
+  canciones: Cancion[];
+  onAdd: (nombre: string, cancion: Cancion) => void;
+  onRemove: (index: number) => void;
+  onSiguienteTurno: () => void;
+  onLimpiarCantados: () => void;
+  onVaciarCola: () => void;
+}
+
+// Manual, ordered alternative to the random draw — toggled via the "Cola de
+// Turnos" switch in Opciones de Sorteo. See siguienteTurno() for how a turn
+// reuses the existing startStage/revealCantante flow.
+function ColaTurnosPanel({ colaRows, canciones, onAdd, onRemove, onSiguienteTurno, onLimpiarCantados, onVaciarCola }: ColaTurnosPanelProps) {
+  const [nombre, setNombre] = useState("");
+  const [cancionTitulo, setCancionTitulo] = useState("");
+  const pendientes = colaRows.filter((r) => !r.ya_canto);
+  const cantados = colaRows.filter((r) => r.ya_canto).length;
+
+  const handleAdd = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cancion = canciones.find((c) => c.titulo === cancionTitulo);
+    if (!nombre.trim() || !cancion) return;
+    onAdd(nombre, cancion);
+    setNombre("");
+    setCancionTitulo("");
+  };
+
+  return (
+    <div className="glass-card rounded-3xl p-6 neon-border relative overflow-hidden bg-white/5 backdrop-blur-md border border-white/10 space-y-4">
+      <div className="flex items-center gap-2">
+        <ListOrdered className="text-neon-blue w-5 h-5" />
+        <h2 className="text-xl font-bold uppercase tracking-wider text-neon-blue">Cola de Turnos</h2>
+      </div>
+
+      <form onSubmit={handleAdd} className="space-y-2">
+        <input
+          value={nombre}
+          onChange={(e) => setNombre(e.target.value)}
+          placeholder="Nombre del cantante..."
+          className="w-full rounded-xl px-4 py-3 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 transition-all text-sm text-white placeholder:text-white/20 font-sans"
+        />
+        <select
+          value={cancionTitulo}
+          onChange={(e) => setCancionTitulo(e.target.value)}
+          className="w-full rounded-xl px-4 py-3 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 transition-all text-sm text-white font-sans"
+        >
+          <option value="" className="bg-[#121212]">Elegir canción del cancionero...</option>
+          {canciones.map((c, i) => (
+            <option key={`${c.titulo}-${i}`} value={c.titulo} className="bg-[#121212]">
+              {c.titulo} — {c.artista || "Desconocido"}
+            </option>
+          ))}
+        </select>
+        <button
+          type="submit"
+          disabled={!nombre.trim() || !cancionTitulo}
+          className="w-full flex items-center justify-center gap-2 p-3 bg-neon-blue/10 hover:bg-neon-blue/20 disabled:opacity-40 disabled:cursor-not-allowed border border-neon-blue/20 rounded-xl text-xs font-bold uppercase tracking-wider text-neon-blue transition-colors"
+        >
+          <Plus size={14} /> Agregar a la Cola
+        </button>
+      </form>
+
+      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
+        <AnimatePresence initial={false}>
+          {colaRows.map((r, i) => (
+            <motion.div
+              key={r.id}
+              initial={{ x: 20, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: -20, opacity: 0 }}
+              className={`flex items-center justify-between p-3 rounded-xl border transition-all ${r.ya_canto ? 'bg-white/5 border-white/5 opacity-40' : 'bg-neon-blue/10 border-neon-blue/20'}`}
+            >
+              <div className="flex flex-col">
+                <span className="font-medium text-sm flex items-center gap-2">
+                  {r.nombre}
+                  {r.ya_canto && <CheckCircle2 size={14} className="text-emerald-400 shrink-0" aria-label="Ya cantó" />}
+                </span>
+                <span className="text-[10px] opacity-50 uppercase tracking-tighter">
+                  {r.cancion_titulo}{r.cancion_artista ? ` — ${r.cancion_artista}` : ''}
+                </span>
+              </div>
+              <button onClick={() => onRemove(i)} className="text-white/20 hover:text-red-400 transition-colors">
+                <Trash2 size={14} />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        {colaRows.length === 0 && (
+          <div className="py-6 text-center opacity-40 italic text-sm">Nadie en la cola todavía</div>
+        )}
+      </div>
+
+      <button
+        onClick={onSiguienteTurno}
+        disabled={pendientes.length === 0}
+        className="w-full py-4 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold text-lg uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:grayscale flex items-center justify-center gap-3 shadow-xl text-white"
+      >
+        <SkipForward size={20} /> Siguiente Turno
+      </button>
+
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={onLimpiarCantados}
+          disabled={cantados === 0}
+          className="flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 disabled:opacity-30 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70"
+        >
+          <Eraser size={14} /> Limpiar Cantados
+        </button>
+        <button
+          onClick={onVaciarCola}
+          disabled={colaRows.length === 0}
+          className="flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 disabled:opacity-30 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70"
+        >
+          <Trash2 size={14} /> Vaciar Cola
+        </button>
+      </div>
     </div>
   );
 }

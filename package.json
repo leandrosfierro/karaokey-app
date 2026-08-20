@@ -18,6 +18,7 @@
     "react-dom": "19.2.8",
     "react-player": "^3.4.0",
     "screenfull": "^6.0.2",
+    "soundtouchjs": "^0.3.0",
     "uuid": "^14.0.1"
   },
   "devDependencies": {

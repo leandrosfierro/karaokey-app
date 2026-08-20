@@ -27,3 +27,22 @@ export interface CancionRow {
     artista: string | null;
     created_at: string;
 }
+
+export interface LocalAudioRow {
+    id: string;
+    titulo: string;
+    artista: string | null;
+    storage_path: string;
+    duration_seconds: number | null;
+    file_size_bytes: number | null;
+    created_at: string;
+}
+
+export interface ColaTurnoRow {
+    id: string;
+    nombre: string;
+    cancion_titulo: string;
+    cancion_artista: string | null;
+    ya_canto: boolean;
+    created_at: string;
+}
