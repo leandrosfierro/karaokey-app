@@ -33,6 +33,12 @@ interface LocalAudioDeckEvents {
     onStateChange: (event: DeckStateChangeEvent) => void;
 }
 
+interface LocalAudioDeckOptions {
+    autoCue?: boolean;
+}
+
+const AUTO_CUE_SILENCE_THRESHOLD = 0.01;
+
 // Plays a locally-uploaded audio file through the Web Audio API with real, independent
 // pitch/tempo control via soundtouchjs — only possible because we own the raw PCM data,
 // unlike a YouTube iframe embed (which never exposes decoded audio to the page).
@@ -45,9 +51,15 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
     private lastVolume = 100;
     private destroyed = false;
     private events: LocalAudioDeckEvents;
+    private autoCue: boolean;
 
-    constructor(publicUrl: string, events: LocalAudioDeckEvents) {
+    // Seconds into the track where the first non-silent sample falls — only computed
+    // when autoCue is enabled. Read by the caller right after onReady to seed a cue point.
+    autoCueSeconds = 0;
+
+    constructor(publicUrl: string, events: LocalAudioDeckEvents, options: LocalAudioDeckOptions = {}) {
         this.events = events;
+        this.autoCue = options.autoCue ?? false;
         this.init(publicUrl);
     }
 
@@ -63,6 +75,10 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
             if (this.destroyed) {
                 ctx.close();
                 return;
+            }
+
+            if (this.autoCue) {
+                this.autoCueSeconds = findFirstNonSilentSecond(audioBuffer);
             }
 
             const gain = ctx.createGain();
@@ -106,7 +122,7 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
         this.events.onStateChange({ data: 2 });
     }
 
-    seekTo(seconds: number) {
+    seekTo(seconds: number, _allowSeekAhead?: boolean) {
         if (!this.shifter || !this.shifter.duration) return;
         // Note: soundtouchjs's percentagePlayed getter returns 0-100, but its setter
         // expects a 0-1 fraction — an inconsistency in the library itself, not a typo here.
@@ -162,4 +178,16 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
         this.gainNode = null;
         this.audioCtx = null;
     }
+}
+
+// Auto Cue: skip leading silence by finding the first sample past a small threshold
+// on the first channel, so playback starts right where the track actually begins.
+function findFirstNonSilentSecond(buffer: AudioBuffer): number {
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+        if (Math.abs(data[i]) > AUTO_CUE_SILENCE_THRESHOLD) {
+            return i / buffer.sampleRate;
+        }
+    }
+    return 0;
 }

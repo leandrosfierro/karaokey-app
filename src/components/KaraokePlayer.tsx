@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Image from 'next/image';
 import screenfull from 'screenfull';
-import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Settings2, Play, Pause, Upload } from 'lucide-react';
+import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Play, Upload, SkipBack, Flag, Square, ArrowLeftRight, MonitorPlay } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
 import { supabase, LocalAudioRow } from '../lib/supabase';
@@ -9,6 +9,17 @@ import { DeckAdapter, LocalAudioDeckAdapter } from '../lib/deckAdapter';
 
 const LOCAL_AUDIO_BUCKET = 'karaokey-audio';
 const MAX_LOCAL_FILE_BYTES = 25 * 1024 * 1024;
+const AUTO_CROSSFADE_THRESHOLD_SECONDS = 6;
+const AUTO_CROSSFADE_RAMP_MS = 4000;
+const ON_AIR_CHANNEL = 'karaokey-on-air';
+
+// A freshly-constructed YT.Player is assigned to a ref synchronously, but its API
+// methods (getCurrentTime, seekTo, etc.) aren't actually callable until the iframe's
+// internal ready handshake completes — calling them too early throws. Every read/call
+// site on a deck ref (outside the player's own onReady handler) must go through this.
+function deckReady(player: DeckAdapter | null): player is DeckAdapter {
+    return !!player && typeof player.getCurrentTime === 'function';
+}
 
 function formatTime(seconds: number): string {
     if (!isFinite(seconds) || seconds < 0) seconds = 0;
@@ -17,7 +28,10 @@ function formatTime(seconds: number): string {
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// NATIVE YOUTUBE API IMPLEMENTATION (Dual Player)
+// TWO INDEPENDENT DECKS — Deck A/B can each hold any track (YouTube or local upload),
+// mirroring how a real DJ console works. There is no built-in "karaoke + original vocal
+// of the same song" pairing — that's now just something the host can do manually by
+// loading a plain (non-"karaoke") search result into the other deck.
 
 interface KaraokePlayerProps {
     song: { titulo: string; artista?: string };
@@ -32,11 +46,6 @@ interface VideoResult {
     thumbnail: string;
 }
 
-// Titles that give away a karaoke/instrumental upload, used to keep those out of the
-// "original version" pick — YouTube search for regional genres (cuarteto, cumbia, etc.)
-// is dominated by karaoke channels, so the raw top result is often karaoke again.
-const KARAOKE_LIKE_TITLE = /karaoke|instrumental|solo\s*pista|sin\s*voz|backing\s*track|videoke|midi/i;
-
 // Stable per-song lookup key for the video cache — same song should hit the
 // same cache row regardless of accents/casing/whitespace differences.
 function cancionCacheKey(titulo: string, artista?: string): string {
@@ -48,28 +57,6 @@ function cancionCacheKey(titulo: string, artista?: string): string {
         .trim();
 }
 
-function normalizeTitle(s: string): string {
-    return s
-        .toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-// Lower is better: prefer results whose title actually names the song (an artist's
-// channel can surface unrelated songs, full albums, or "greatest hits" compilations
-// that mention neither the song nor "karaoke") and that aren't karaoke uploads.
-function scoreOriginalCandidate(videoTitle: string, songTitle: string): number {
-    const normalizedSong = normalizeTitle(songTitle);
-    const matchesSong = normalizedSong.length > 0 && normalizeTitle(videoTitle).includes(normalizedSong);
-    const looksKaraoke = KARAOKE_LIKE_TITLE.test(videoTitle);
-    if (matchesSong && !looksKaraoke) return 0;
-    if (matchesSong && looksKaraoke) return 1;
-    if (!matchesSong && !looksKaraoke) return 2;
-    return 3;
-}
-
 declare global {
     interface Window {
         onYouTubeIframeAPIReady: () => void;
@@ -77,107 +64,133 @@ declare global {
     }
 }
 
+type DeckKind = 'youtube' | 'local';
+type DeckLetter = 'A' | 'B';
+
 export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext }) => {
     const toast = useToast();
     const [isFullscreen, setIsFullscreen] = useState(false);
-    const [karaokeVideoId, setKaraokeVideoId] = useState<string | null>(null);
-    const [alternatives, setAlternatives] = useState<VideoResult[]>([]);
-    const [originalVideoId, setOriginalVideoId] = useState<string | null>(null);
-    const [originalAlternatives, setOriginalAlternatives] = useState<VideoResult[]>([]);
     const [loading, setLoading] = useState(true);
-    const playerContainerRef = useRef<HTMLDivElement>(null);
+    const videoRowRef = useRef<HTMLDivElement>(null);
     const hasFetched = useRef(false);
 
-    // Native Player References — a DeckAdapter is either a real YT.Player (structurally
-    // compatible, no wrapper needed) or a LocalAudioDeckAdapter for uploaded files.
-    const masterPlayer = useRef<DeckAdapter | null>(null);
-    const slavePlayer = useRef<DeckAdapter | null>(null);
+    // ---- Deck A ----
+    const deckAPlayer = useRef<DeckAdapter | null>(null);
+    const [deckAVideoId, setDeckAVideoId] = useState<string | null>(null);
+    const [deckAAlternatives, setDeckAAlternatives] = useState<VideoResult[]>([]);
+    const [deckAKind, setDeckAKind] = useState<DeckKind>('youtube');
+    const [deckALocalTrack, setDeckALocalTrack] = useState<LocalAudioRow | null>(null);
+    const [deckAPitch, setDeckAPitch] = useState(0);
+    const [deckATempo, setDeckATempo] = useState(100);
+    const [deckAIsPlaying, setDeckAIsPlaying] = useState(false);
+    const [deckACurrentTime, setDeckACurrentTime] = useState(0);
+    const [deckADuration, setDeckADuration] = useState(0);
+    const deckACuePointRef = useRef(0);
 
-    // 0 = Karaoke Only, 1 = Original Only (Crossfade)
-    const [assistLevel, setAssistLevel] = useState(0);
+    // ---- Deck B ----
+    const deckBPlayer = useRef<DeckAdapter | null>(null);
+    const [deckBVideoId, setDeckBVideoId] = useState<string | null>(null);
+    const [deckBAlternatives, setDeckBAlternatives] = useState<VideoResult[]>([]);
+    const [deckBKind, setDeckBKind] = useState<DeckKind>('youtube');
+    const [deckBLocalTrack, setDeckBLocalTrack] = useState<LocalAudioRow | null>(null);
+    const [deckBPitch, setDeckBPitch] = useState(0);
+    const [deckBTempo, setDeckBTempo] = useState(100);
+    const [deckBIsPlaying, setDeckBIsPlaying] = useState(false);
+    const [deckBCurrentTime, setDeckBCurrentTime] = useState(0);
+    const [deckBDuration, setDeckBDuration] = useState(0);
+    const deckBCuePointRef = useRef(0);
 
-    // Manual Sync Offset (in seconds) - shift the original track relative to karaoke
-    const [syncOffset, setSyncOffset] = useState(0);
-
-    // Independent per-deck volume trims, layered on top of the crossfader.
+    // ---- Mixer ----
+    const [assistLevel, setAssistLevel] = useState(0); // 0 = full Deck A, 1 = full Deck B
     const [volA, setVolA] = useState(100);
     const [volB, setVolB] = useState(100);
+    const [autoCue, setAutoCue] = useState(true);
+    const [autoCrossfade, setAutoCrossfade] = useState(false);
+    const rampingRef = useRef(false);
 
-    // Source kind per deck: a YouTube search result, or a track from the local library.
-    const [masterKind, setMasterKind] = useState<'youtube' | 'local'>('youtube');
-    const [slaveKind, setSlaveKind] = useState<'youtube' | 'local'>('youtube');
-    const [karaokeLocalTrack, setKaraokeLocalTrack] = useState<LocalAudioRow | null>(null);
-    const [originalLocalTrack, setOriginalLocalTrack] = useState<LocalAudioRow | null>(null);
+    // ---- Local audio library (shared by both decks) ----
     const [localTracks, setLocalTracks] = useState<LocalAudioRow[]>([]);
     const [uploadingLocal, setUploadingLocal] = useState(false);
 
-    // Real pitch (semitones) / tempo (%) — only meaningful for local decks, since a
-    // YouTube iframe never exposes raw audio for the Web Audio API to process.
-    const [karaokePitch, setKaraokePitch] = useState(0);
-    const [karaokeTempo, setKaraokeTempo] = useState(100);
-    const [originalPitch, setOriginalPitch] = useState(0);
-    const [originalTempo, setOriginalTempo] = useState(100);
-
-    // Local decks have no native browser chrome (no iframe controls), so we track
-    // minimal transport state ourselves to render a custom play/pause + seek bar.
-    const [masterIsPlaying, setMasterIsPlaying] = useState(false);
-    const [masterCurrentTime, setMasterCurrentTime] = useState(0);
-    const [masterDuration, setMasterDuration] = useState(0);
-
     // Refs mirroring latest state so player event callbacks (bound once by the
-    // YouTube API) always read current values without re-binding on every change.
-    const syncOffsetRef = useRef(syncOffset);
-    useEffect(() => { syncOffsetRef.current = syncOffset; }, [syncOffset]);
-
+    // YouTube API, or fired from inside the local adapter) always read current values.
     const assistLevelRef = useRef(assistLevel);
     useEffect(() => { assistLevelRef.current = assistLevel; }, [assistLevel]);
-
     const volARef = useRef(volA);
     useEffect(() => { volARef.current = volA; }, [volA]);
     const volBRef = useRef(volB);
     useEffect(() => { volBRef.current = volB; }, [volB]);
+    const deckAPitchRef = useRef(deckAPitch);
+    useEffect(() => { deckAPitchRef.current = deckAPitch; }, [deckAPitch]);
+    const deckATempoRef = useRef(deckATempo);
+    useEffect(() => { deckATempoRef.current = deckATempo; }, [deckATempo]);
+    const deckBPitchRef = useRef(deckBPitch);
+    useEffect(() => { deckBPitchRef.current = deckBPitch; }, [deckBPitch]);
+    const deckBTempoRef = useRef(deckBTempo);
+    useEffect(() => { deckBTempoRef.current = deckBTempo; }, [deckBTempo]);
+    const autoCueRef = useRef(autoCue);
+    useEffect(() => { autoCueRef.current = autoCue; }, [autoCue]);
 
-    const karaokePitchRef = useRef(karaokePitch);
-    useEffect(() => { karaokePitchRef.current = karaokePitch; }, [karaokePitch]);
-    const karaokeTempoRef = useRef(karaokeTempo);
-    useEffect(() => { karaokeTempoRef.current = karaokeTempo; }, [karaokeTempo]);
-    const originalPitchRef = useRef(originalPitch);
-    useEffect(() => { originalPitchRef.current = originalPitch; }, [originalPitch]);
-    const originalTempoRef = useRef(originalTempo);
-    useEffect(() => { originalTempoRef.current = originalTempo; }, [originalTempo]);
-
-    const handleMasterStateChange = (event: any) => {
-        const state = event.data;
-        const offset = syncOffsetRef.current; // Read latest offset
-
-        setMasterIsPlaying(state === 1);
-
-        // Playing
-        if (state === 1) {
-            if (slavePlayer.current && typeof slavePlayer.current.playVideo === 'function') {
-                slavePlayer.current.playVideo();
-
-                const masterTime = masterPlayer.current!.getCurrentTime();
-                const slaveTime = slavePlayer.current.getCurrentTime();
-
-                // Target time allows negative offset (clamped to 0)
-                const targetTime = Math.max(0, masterTime + offset);
-
-                if (Math.abs(targetTime - slaveTime) > 0.3) {
-                    slavePlayer.current.seekTo(targetTime, true);
-                }
-            }
-        }
-
-        // Paused/Ended
-        if (state === 2 || state === 0) {
-            if (slavePlayer.current && typeof slavePlayer.current.pauseVideo === 'function') {
-                slavePlayer.current.pauseVideo();
-            }
-        }
+    // Whichever deck is louder in the current mix is "on air" — same idea a real DJ
+    // booth uses for what feeds the external monitor.
+    const onAirDeck = (): DeckLetter => {
+        const effA = (1 - assistLevel) * (volA / 100);
+        const effB = assistLevel * (volB / 100);
+        return effA >= effB ? 'A' : 'B';
     };
 
-    // Load YouTube API just once
+    // ---- External on-air monitor (second window) ----
+    const onAirChannelRef = useRef<BroadcastChannel | null>(null);
+    useEffect(() => {
+        if (typeof BroadcastChannel === 'undefined') return;
+        onAirChannelRef.current = new BroadcastChannel(ON_AIR_CHANNEL);
+        return () => onAirChannelRef.current?.close();
+    }, []);
+
+    const openExternalMonitor = () => {
+        window.open('/pantalla-externa', 'karaokey-external', 'width=960,height=540');
+    };
+
+    // Broadcast on-air identity whenever it (or its content) changes.
+    useEffect(() => {
+        const deck = onAirDeck();
+        const kind = deck === 'A' ? deckAKind : deckBKind;
+        const videoId = deck === 'A' ? deckAVideoId : deckBVideoId;
+        const localTrack = deck === 'A' ? deckALocalTrack : deckBLocalTrack;
+        onAirChannelRef.current?.postMessage({
+            type: 'on-air',
+            deck,
+            kind,
+            videoId,
+            titulo: kind === 'local' ? localTrack?.titulo ?? null : null,
+            artista: kind === 'local' ? localTrack?.artista ?? null : null,
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [assistLevel, volA, volB, deckAKind, deckAVideoId, deckALocalTrack, deckBKind, deckBVideoId, deckBLocalTrack]);
+
+    // Periodic time-sync tick for a YouTube deck that's on air, so the external
+    // window's muted mirror doesn't visibly drift out of sync.
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const deck = onAirDeck();
+            const kind = deck === 'A' ? deckAKind : deckBKind;
+            if (kind !== 'youtube') return;
+            const player = deck === 'A' ? deckAPlayer.current : deckBPlayer.current;
+            const videoId = deck === 'A' ? deckAVideoId : deckBVideoId;
+            if (!deckReady(player) || !videoId) return;
+            onAirChannelRef.current?.postMessage({
+                type: 'sync',
+                deck,
+                videoId,
+                currentTime: player.getCurrentTime(),
+                isPlaying: player.getPlayerState() === 1,
+            });
+        }, 2000);
+        return () => clearInterval(interval);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [assistLevel, volA, volB, deckAKind, deckBKind, deckAVideoId, deckBVideoId]);
+
+    // ---- Load YouTube API just once ----
     useEffect(() => {
         if (!window.YT) {
             const tag = document.createElement('script');
@@ -232,65 +245,42 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         }
     };
 
-    const selectKaraokeYoutube = (id: string) => {
-        setMasterKind('youtube');
-        setKaraokeVideoId(id);
-    };
-    const selectKaraokeLocal = (track: LocalAudioRow) => {
-        setMasterKind('local');
-        setKaraokeLocalTrack(track);
-    };
-    const selectOriginalYoutube = (id: string) => {
-        setSlaveKind('youtube');
-        setOriginalVideoId(id);
-    };
-    const selectOriginalLocal = (track: LocalAudioRow) => {
-        setSlaveKind('local');
-        setOriginalLocalTrack(track);
-    };
+    const selectDeckAYoutube = (id: string) => { setDeckAKind('youtube'); setDeckAVideoId(id); };
+    const selectDeckALocal = (track: LocalAudioRow) => { setDeckAKind('local'); setDeckALocalTrack(track); };
+    const selectDeckBYoutube = (id: string) => { setDeckBKind('youtube'); setDeckBVideoId(id); };
+    const selectDeckBLocal = (track: LocalAudioRow) => { setDeckBKind('local'); setDeckBLocalTrack(track); };
 
-    // Fetch Videos. The component is remounted (fresh state) per song via the
-    // `key` prop set by the parent, so no manual state reset is needed here.
+    // Fetch the karaoke track for Deck A only. The component is remounted (fresh
+    // state) per song via the `key` prop set by the parent. Deck B starts empty —
+    // the host loads whatever they want into it manually.
     useEffect(() => {
         const fetchVideos = async () => {
             if (hasFetched.current) return;
             hasFetched.current = true;
 
             const cacheKey = cancionCacheKey(song.titulo, song.artista);
-            console.log('[KaraoKey] Fetching videos for:', song.titulo, song.artista);
 
-            // Check the cache first — repeat songs (very likely across a party, or the
-            // next one) don't burn any YouTube search quota at all.
             const { data: cached } = await supabase
                 .from('karaokey_video_cache')
                 .select('*')
                 .eq('cancion_key', cacheKey)
                 .maybeSingle();
 
-            if (cached) {
-                console.log('[KaraoKey] Cache hit for', cacheKey);
-                setAlternatives(cached.karaoke_alternatives ?? []);
-                setKaraokeVideoId(cached.karaoke_video_id ?? null);
-                setOriginalAlternatives(cached.original_alternatives ?? []);
-                setOriginalVideoId(cached.original_video_id ?? null);
+            if (cached && cached.karaoke_video_id) {
+                setDeckAAlternatives(cached.karaoke_alternatives ?? []);
+                setDeckAVideoId(cached.karaoke_video_id);
                 setLoading(false);
                 return;
             }
 
             try {
-                // 1. Karaoke Search
                 const kQuery = `${song.titulo} ${song.artista || ''} karaoke`;
-                console.log('[KaraoKey] Karaoke query:', kQuery);
-
                 const kRes = await fetch(`/api/youtube?q=${encodeURIComponent(kQuery)}`);
                 const kData = await kRes.json();
 
                 if (!kRes.ok) {
-                    console.error('[KaraoKey] API Error:', kRes.status, kData);
                     throw new Error(kData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${kRes.status}`);
                 }
-
-                console.log('[KaraoKey] Karaoke results:', kData);
 
                 let karaokeResults: VideoResult[] = [];
                 if (kData.items && kData.items.length > 0) {
@@ -299,70 +289,19 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         title: item.snippet.title,
                         thumbnail: item.snippet.thumbnails.medium.url
                     }));
-                    setAlternatives(karaokeResults);
-                    setKaraokeVideoId(karaokeResults[0].id);
-                    console.log('[KaraoKey] Karaoke video selected:', karaokeResults[0].id);
-                } else {
-                    console.warn('[KaraoKey] No karaoke results found');
+                    setDeckAAlternatives(karaokeResults);
+                    setDeckAVideoId(karaokeResults[0].id);
                 }
 
-                // 2. Original Search — dropping the literal "official video" qualifier:
-                // for regional genres (cuarteto, cumbia, etc.) most uploads aren't tagged
-                // in English, so the plain title+artist search matches better in practice.
-                const oQuery = `${song.titulo} ${song.artista || ''}`.trim();
-                console.log('[KaraoKey] Original query:', oQuery);
-
-                const oRes = await fetch(`/api/youtube?q=${encodeURIComponent(oQuery)}`);
-                const oData = await oRes.json();
-
-                if (!oRes.ok) {
-                    console.error('[KaraoKey] API Error:', oRes.status, oData);
-                    throw new Error(oData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${oRes.status}`);
-                }
-
-                console.log('[KaraoKey] Original results:', oData);
-
-                let rankedOriginal: VideoResult[] = [];
-                if (oData.items && oData.items.length > 0) {
-                    const oResults: VideoResult[] = oData.items.map((item: any) => ({
-                        id: item.id.videoId,
-                        title: item.snippet.title,
-                        thumbnail: item.snippet.thumbnails.medium.url
-                    }));
-
-                    // Rank by: actually names the song & isn't karaoke (best) → names the
-                    // song but is karaoke → neither names it nor is karaoke → worst case.
-                    // An artist's own channel can just as easily surface an unrelated
-                    // single, a full album, or a "greatest hits" compilation.
-                    rankedOriginal = oResults
-                        .map((v, i) => ({ v, score: scoreOriginalCandidate(v.title, song.titulo), i }))
-                        .sort((a, b) => a.score - b.score || a.i - b.i)
-                        .map((r) => r.v);
-
-                    setOriginalAlternatives(rankedOriginal);
-                    setOriginalVideoId(rankedOriginal[0].id);
-                    console.log('[KaraoKey] Original video selected:', rankedOriginal[0].id, rankedOriginal[0].title);
-
-                    if (scoreOriginalCandidate(rankedOriginal[0].title, song.titulo) > 0) {
-                        toast(`No encontramos con certeza la versión original de "${song.titulo}". Elegí una manualmente en "Voz Original" si hace falta.`, { type: 'info', duration: 6000 });
-                    }
-                } else {
-                    console.warn('[KaraoKey] No original results found');
-                }
-
-                // Cache for next time this song comes up (fire and forget)
                 supabase.from('karaokey_video_cache').upsert({
                     cancion_key: cacheKey,
                     karaoke_video_id: karaokeResults[0]?.id ?? null,
                     karaoke_alternatives: karaokeResults,
-                    original_video_id: rankedOriginal[0]?.id ?? null,
-                    original_alternatives: rankedOriginal,
                 }, { onConflict: 'cancion_key' }).then(({ error }) => {
                     if (error) console.error('[KaraoKey] Failed to cache video search:', error);
                 });
-
             } catch (error) {
-                console.error("[KaraoKey] CRITICAL Error fetching videos:", error);
+                console.error("[KaraoKey] Error fetching Deck A video:", error);
                 if (error instanceof Error && error.message === 'quota_exceeded') {
                     toast('Se agotó la cuota diaria gratuita de búsquedas de YouTube. Va a volver a funcionar mañana.', { type: 'error', duration: 8000 });
                 } else {
@@ -370,7 +309,6 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 }
             } finally {
                 setLoading(false);
-                console.log('[KaraoKey] Fetch completed. Loading:', false);
             }
         };
 
@@ -379,267 +317,234 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         }
     }, [song.titulo, song.artista, toast]);
 
-    // Initialize/Update MASTER Deck (Karaoke) — YouTube branch unchanged; local branch
-    // constructs a LocalAudioDeckAdapter into the same ref via structural typing.
+    // ---- Init/update Deck A ----
     useEffect(() => {
-        if (masterKind === 'local') {
-            if (!karaokeLocalTrack) return;
-            if (masterPlayer.current) {
-                try { masterPlayer.current.destroy(); } catch (e) { }
-            }
-            const { data } = supabase.storage.from(LOCAL_AUDIO_BUCKET).getPublicUrl(karaokeLocalTrack.storage_path);
+        if (deckAKind === 'local') {
+            if (!deckALocalTrack) return;
+            if (deckAPlayer.current) { try { deckAPlayer.current.destroy(); } catch (e) { } }
+            const { data } = supabase.storage.from(LOCAL_AUDIO_BUCKET).getPublicUrl(deckALocalTrack.storage_path);
             const adapter = new LocalAudioDeckAdapter(data.publicUrl, {
                 onReady: (event) => {
                     const vol = Math.floor((1 - assistLevelRef.current) * 100 * (volARef.current / 100));
                     event.target.setVolume(vol);
-                    adapter.setPitchSemitones(karaokePitchRef.current);
-                    adapter.setTempo(karaokeTempoRef.current);
-                    setMasterDuration(adapter.getDuration());
-                    setMasterCurrentTime(0);
+                    adapter.setPitchSemitones(deckAPitchRef.current);
+                    adapter.setTempo(deckATempoRef.current);
+                    setDeckADuration(adapter.getDuration());
+                    const cue = adapter.autoCueSeconds > 0 ? adapter.autoCueSeconds : 0;
+                    deckACuePointRef.current = cue;
+                    if (cue > 0) adapter.seekTo(cue, true);
+                    setDeckACurrentTime(cue);
                 },
-                onStateChange: (event) => handleMasterStateChange(event),
-            });
-            masterPlayer.current = adapter;
+                onStateChange: (event) => setDeckAIsPlaying(event.data === 1),
+            }, { autoCue: autoCueRef.current });
+            deckAPlayer.current = adapter;
             return;
         }
 
-        if (!karaokeVideoId) return;
+        if (!deckAVideoId) return;
 
-        const initMaster = () => {
-            if (masterPlayer.current) {
-                try { masterPlayer.current.destroy(); } catch (e) { }
-            }
-
-            masterPlayer.current = new window.YT.Player('youtube-player-master', {
+        const initA = () => {
+            if (deckAPlayer.current) { try { deckAPlayer.current.destroy(); } catch (e) { } }
+            deckAPlayer.current = new window.YT.Player('youtube-player-deck-a', {
                 height: '100%',
                 width: '100%',
-                videoId: karaokeVideoId,
-                playerVars: {
-                    'playsinline': 1,
-                    'controls': 1, // Native controls
-                    'rel': 0,
-                    'origin': window.location.origin
-                },
+                videoId: deckAVideoId,
+                playerVars: { playsinline: 1, controls: 0, rel: 0, origin: window.location.origin },
                 events: {
-                    'onReady': (event: any) => {
-                        // Apply initial volume (read from ref: always current, no re-init on crossfader moves)
+                    onReady: (event: any) => {
                         const vol = Math.floor((1 - assistLevelRef.current) * 100 * (volARef.current / 100));
                         event.target.setVolume(vol);
+                        deckACuePointRef.current = 0;
                     },
-                    'onStateChange': (event: any) => {
-                        // Use separate handler to access latest state/refs
-                        handleMasterStateChange(event);
-                    }
+                    onStateChange: (event: any) => setDeckAIsPlaying(event.data === 1),
                 }
             });
         };
 
-        if (window.YT && window.YT.Player) {
-            initMaster();
-        } else {
-            // Retry
+        if (window.YT && window.YT.Player) initA();
+        else {
             const interval = setInterval(() => {
-                if (window.YT && window.YT.Player) {
-                    clearInterval(interval);
-                    initMaster();
-                }
+                if (window.YT && window.YT.Player) { clearInterval(interval); initA(); }
             }, 100);
         }
-    }, [masterKind, karaokeVideoId, karaokeLocalTrack]);
+    }, [deckAKind, deckAVideoId, deckALocalTrack]);
 
-    // Local master deck has no native browser chrome — poll its own transport state
-    // to drive a custom play/pause + seek UI.
+    // ---- Init/update Deck B (mirrors Deck A) ----
     useEffect(() => {
-        if (masterKind !== 'local') return;
-        const interval = setInterval(() => {
-            if (masterPlayer.current) {
-                setMasterCurrentTime(masterPlayer.current.getCurrentTime());
-                setMasterDuration(masterPlayer.current.getDuration());
-            }
-        }, 250);
-        return () => clearInterval(interval);
-    }, [masterKind, karaokeLocalTrack]);
-
-    const toggleMasterPlay = () => {
-        if (!masterPlayer.current) return;
-        if (masterPlayer.current.getPlayerState() === 1) {
-            masterPlayer.current.pauseVideo();
-        } else {
-            masterPlayer.current.playVideo();
-        }
-    };
-
-    const seekMaster = (seconds: number) => {
-        masterPlayer.current?.seekTo(seconds, true);
-        setMasterCurrentTime(seconds);
-    };
-
-    // Live pitch/tempo updates for already-loaded local decks (only meaningful when
-    // that deck's source is a local file — YouTube can never support this).
-    useEffect(() => {
-        if (masterKind === 'local' && masterPlayer.current instanceof LocalAudioDeckAdapter) {
-            masterPlayer.current.setPitchSemitones(karaokePitch);
-            masterPlayer.current.setTempo(karaokeTempo);
-        }
-    }, [karaokePitch, karaokeTempo, masterKind]);
-
-    useEffect(() => {
-        if (slaveKind === 'local' && slavePlayer.current instanceof LocalAudioDeckAdapter) {
-            slavePlayer.current.setPitchSemitones(originalPitch);
-            slavePlayer.current.setTempo(originalTempo);
-        }
-    }, [originalPitch, originalTempo, slaveKind]);
-
-    // Initialize/Update SLAVE Deck (Original) — YouTube branch unchanged; local branch
-    // mirrors the master's local-adapter construction.
-    useEffect(() => {
-        if (slaveKind === 'local') {
-            if (!originalLocalTrack) return;
-            if (slavePlayer.current) {
-                try { slavePlayer.current.destroy(); } catch (e) { }
-            }
-            const { data } = supabase.storage.from(LOCAL_AUDIO_BUCKET).getPublicUrl(originalLocalTrack.storage_path);
+        if (deckBKind === 'local') {
+            if (!deckBLocalTrack) return;
+            if (deckBPlayer.current) { try { deckBPlayer.current.destroy(); } catch (e) { } }
+            const { data } = supabase.storage.from(LOCAL_AUDIO_BUCKET).getPublicUrl(deckBLocalTrack.storage_path);
             const adapter = new LocalAudioDeckAdapter(data.publicUrl, {
                 onReady: (event) => {
                     const vol = Math.floor(assistLevelRef.current * 100 * (volBRef.current / 100));
                     event.target.setVolume(vol);
-                    if (vol > 0) event.target.unMute(); else event.target.mute();
-                    adapter.setPitchSemitones(originalPitchRef.current);
-                    adapter.setTempo(originalTempoRef.current);
-
-                    if (masterPlayer.current && typeof masterPlayer.current.getCurrentTime === 'function') {
-                        const masterTime = masterPlayer.current.getCurrentTime();
-                        const targetTime = Math.max(0, masterTime + syncOffsetRef.current);
-                        event.target.seekTo(targetTime, true);
-
-                        if (masterPlayer.current.getPlayerState && masterPlayer.current.getPlayerState() === 1) {
-                            event.target.playVideo();
-                        } else {
-                            event.target.pauseVideo();
-                        }
-                    }
+                    adapter.setPitchSemitones(deckBPitchRef.current);
+                    adapter.setTempo(deckBTempoRef.current);
+                    setDeckBDuration(adapter.getDuration());
+                    const cue = adapter.autoCueSeconds > 0 ? adapter.autoCueSeconds : 0;
+                    deckBCuePointRef.current = cue;
+                    if (cue > 0) adapter.seekTo(cue, true);
+                    setDeckBCurrentTime(cue);
                 },
-                onStateChange: () => { },
-            });
-            slavePlayer.current = adapter;
+                onStateChange: (event) => setDeckBIsPlaying(event.data === 1),
+            }, { autoCue: autoCueRef.current });
+            deckBPlayer.current = adapter;
             return;
         }
 
-        if (!originalVideoId) return;
+        if (!deckBVideoId) return;
 
-        const initSlave = () => {
-            if (slavePlayer.current) {
-                try { slavePlayer.current.destroy(); } catch (e) { }
-            }
-
-            slavePlayer.current = new window.YT.Player('youtube-player-slave', {
+        const initB = () => {
+            if (deckBPlayer.current) { try { deckBPlayer.current.destroy(); } catch (e) { } }
+            deckBPlayer.current = new window.YT.Player('youtube-player-deck-b', {
                 height: '100%',
                 width: '100%',
-                videoId: originalVideoId,
-                playerVars: {
-                    'playsinline': 1,
-                    'controls': 0,
-                    'disablekb': 1,
-                    'rel': 0,
-                    'start': 0,
-                    'origin': window.location.origin
-                },
+                videoId: deckBVideoId,
+                playerVars: { playsinline: 1, controls: 0, rel: 0, origin: window.location.origin },
                 events: {
-                    'onReady': (event: any) => {
-                        // Apply current crossfader position (read from ref: always current,
-                        // no re-init on crossfader moves) instead of always muting — otherwise
-                        // switching to a different "Voz Original" pick mid-song goes silent.
+                    onReady: (event: any) => {
                         const vol = Math.floor(assistLevelRef.current * 100 * (volBRef.current / 100));
                         event.target.setVolume(vol);
-                        if (vol > 0) event.target.unMute();
-                        else event.target.mute();
-
-                        // Align to the karaoke track's current position/state — covers
-                        // picking a different "Voz Original" alternative mid-performance.
-                        if (masterPlayer.current && typeof masterPlayer.current.getCurrentTime === 'function') {
-                            const masterTime = masterPlayer.current.getCurrentTime();
-                            const targetTime = Math.max(0, masterTime + syncOffsetRef.current);
-                            event.target.seekTo(targetTime, true);
-
-                            if (masterPlayer.current.getPlayerState && masterPlayer.current.getPlayerState() === 1) {
-                                event.target.playVideo();
-                            } else {
-                                event.target.pauseVideo();
-                            }
-                        }
-                    }
+                        deckBCuePointRef.current = 0;
+                    },
+                    onStateChange: (event: any) => setDeckBIsPlaying(event.data === 1),
                 }
             });
         };
 
-        if (window.YT && window.YT.Player) {
-            initSlave();
-        } else {
+        if (window.YT && window.YT.Player) initB();
+        else {
             const interval = setInterval(() => {
-                if (window.YT && window.YT.Player) {
-                    clearInterval(interval);
-                    initSlave();
-                }
+                if (window.YT && window.YT.Player) { clearInterval(interval); initB(); }
             }, 100);
         }
-    }, [slaveKind, originalVideoId, originalLocalTrack]);
+    }, [deckBKind, deckBVideoId, deckBLocalTrack]);
 
-    // Resync on Offset Change while Playing
+    // ---- Position polling (both decks, either kind — drives the shared scrubber) ----
     useEffect(() => {
-        if (masterPlayer.current && slavePlayer.current &&
-            masterPlayer.current.getPlayerState && masterPlayer.current.getPlayerState() === 1) {
-
-            const masterTime = masterPlayer.current.getCurrentTime();
-            const targetTime = Math.max(0, masterTime + syncOffset); // Use state directly here as it's a dependency
-            slavePlayer.current.seekTo(targetTime, true);
-        }
-    }, [syncOffset]);
-
-
-    // Volume Crossfader Logic — crossfader position × per-deck volume trim (Vol A/Vol B)
-    useEffect(() => {
-        // Master Volume
-        if (masterPlayer.current && typeof masterPlayer.current.setVolume === 'function') {
-            const vol = Math.floor((1 - assistLevel) * 100 * (volA / 100));
-            masterPlayer.current.setVolume(vol);
-        }
-
-        // Slave Volume & Unmute
-        if (slavePlayer.current && typeof slavePlayer.current.setVolume === 'function') {
-            const vol = Math.floor(assistLevel * 100 * (volB / 100));
-            slavePlayer.current.setVolume(vol);
-
-            // Unmute if volume > 0
-            if (vol > 0) {
-                if (typeof slavePlayer.current.isMuted === 'function' && slavePlayer.current.isMuted()) {
-                    slavePlayer.current.unMute();
-                }
+        const interval = setInterval(() => {
+            if (deckReady(deckAPlayer.current)) {
+                setDeckACurrentTime(deckAPlayer.current.getCurrentTime());
+                const d = deckAPlayer.current.getDuration();
+                if (d) setDeckADuration(d);
             }
+        }, 250);
+        return () => clearInterval(interval);
+    }, [deckAKind, deckAVideoId, deckALocalTrack]);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (deckReady(deckBPlayer.current)) {
+                setDeckBCurrentTime(deckBPlayer.current.getCurrentTime());
+                const d = deckBPlayer.current.getDuration();
+                if (d) setDeckBDuration(d);
+            }
+        }, 250);
+        return () => clearInterval(interval);
+    }, [deckBKind, deckBVideoId, deckBLocalTrack]);
+
+    // ---- Transport: Cue / Set / Play / Stop (uniform across YouTube and local decks) ----
+    const handleSetA = () => { if (deckReady(deckAPlayer.current)) deckACuePointRef.current = deckAPlayer.current.getCurrentTime(); };
+    const handleCueA = () => {
+        deckAPlayer.current?.seekTo(deckACuePointRef.current, true);
+        deckAPlayer.current?.pauseVideo();
+        setDeckACurrentTime(deckACuePointRef.current);
+    };
+    const handlePlayA = () => deckAPlayer.current?.playVideo();
+    const handleStopA = () => { deckAPlayer.current?.pauseVideo(); deckAPlayer.current?.seekTo(0, true); setDeckACurrentTime(0); };
+    const seekDeckA = (seconds: number) => { deckAPlayer.current?.seekTo(seconds, true); setDeckACurrentTime(seconds); };
+
+    const handleSetB = () => { if (deckReady(deckBPlayer.current)) deckBCuePointRef.current = deckBPlayer.current.getCurrentTime(); };
+    const handleCueB = () => {
+        deckBPlayer.current?.seekTo(deckBCuePointRef.current, true);
+        deckBPlayer.current?.pauseVideo();
+        setDeckBCurrentTime(deckBCuePointRef.current);
+    };
+    const handlePlayB = () => deckBPlayer.current?.playVideo();
+    const handleStopB = () => { deckBPlayer.current?.pauseVideo(); deckBPlayer.current?.seekTo(0, true); setDeckBCurrentTime(0); };
+    const seekDeckB = (seconds: number) => { deckBPlayer.current?.seekTo(seconds, true); setDeckBCurrentTime(seconds); };
+
+    // ---- Live pitch/tempo updates (only meaningful for local decks) ----
+    useEffect(() => {
+        if (deckAKind === 'local' && deckAPlayer.current instanceof LocalAudioDeckAdapter) {
+            deckAPlayer.current.setPitchSemitones(deckAPitch);
+            deckAPlayer.current.setTempo(deckATempo);
+        }
+    }, [deckAPitch, deckATempo, deckAKind]);
+
+    useEffect(() => {
+        if (deckBKind === 'local' && deckBPlayer.current instanceof LocalAudioDeckAdapter) {
+            deckBPlayer.current.setPitchSemitones(deckBPitch);
+            deckBPlayer.current.setTempo(deckBTempo);
+        }
+    }, [deckBPitch, deckBTempo, deckBKind]);
+
+    // ---- Igualar: copy pitch from one local deck to the other (no BPM matching — no
+    // BPM detection exists — so tempo is left untouched) ----
+    const igualarEnabled = deckAKind === 'local' && deckBKind === 'local';
+    const igualarBtoA = () => { if (igualarEnabled) setDeckAPitch(deckBPitch); };
+    const igualarAtoB = () => { if (igualarEnabled) setDeckBPitch(deckAPitch); };
+
+    // ---- Volume crossfader logic — applies to both decks uniformly ----
+    useEffect(() => {
+        if (deckAPlayer.current) {
+            const vol = Math.floor((1 - assistLevel) * 100 * (volA / 100));
+            deckAPlayer.current.setVolume(vol);
+            if (vol > 0 && deckReady(deckAPlayer.current) && deckAPlayer.current.isMuted()) deckAPlayer.current.unMute();
+        }
+        if (deckBPlayer.current) {
+            const vol = Math.floor(assistLevel * 100 * (volB / 100));
+            deckBPlayer.current.setVolume(vol);
+            if (vol > 0 && deckReady(deckBPlayer.current) && deckBPlayer.current.isMuted()) deckBPlayer.current.unMute();
         }
     }, [assistLevel, volA, volB]);
 
+    // ---- Auto Crossfade: as the on-air deck nears its end, ramp the crossfader
+    // over to the other deck (if it has something loaded) ----
+    const rampCrossfadeTo = (target: number) => {
+        if (rampingRef.current) return;
+        rampingRef.current = true;
+        const start = assistLevelRef.current;
+        const startTime = Date.now();
+        const step = () => {
+            const elapsed = Date.now() - startTime;
+            const t = Math.min(elapsed / AUTO_CROSSFADE_RAMP_MS, 1);
+            setAssistLevel(start + (target - start) * t);
+            if (t < 1) requestAnimationFrame(step);
+            else rampingRef.current = false;
+        };
+        requestAnimationFrame(step);
+    };
+
+    useEffect(() => {
+        if (!autoCrossfade) return;
+        const interval = setInterval(() => {
+            const deck = onAirDeck();
+            const activeDuration = deck === 'A' ? deckADuration : deckBDuration;
+            const activeTime = deck === 'A' ? deckACurrentTime : deckBCurrentTime;
+            const otherLoaded = deck === 'A' ? (deckBVideoId || deckBLocalTrack) : (deckAVideoId || deckALocalTrack);
+            if (!activeDuration || !otherLoaded) return;
+            const remaining = activeDuration - activeTime;
+            if (remaining > 0 && remaining < AUTO_CROSSFADE_THRESHOLD_SECONDS) {
+                rampCrossfadeTo(deck === 'A' ? 1 : 0);
+            }
+        }, 1000);
+        return () => clearInterval(interval);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [autoCrossfade, assistLevel, volA, volB, deckACurrentTime, deckADuration, deckBCurrentTime, deckBDuration, deckAVideoId, deckALocalTrack, deckBVideoId, deckBLocalTrack]);
+
     const toggleFullscreen = () => {
-        if (playerContainerRef.current && screenfull.isEnabled) {
-            screenfull.toggle(playerContainerRef.current);
+        if (videoRowRef.current && screenfull.isEnabled) {
+            screenfull.toggle(videoRowRef.current);
         }
     };
 
     useEffect(() => {
-        const handler = () => {
-            setIsFullscreen(screenfull.isFullscreen);
-        };
-        if (screenfull.isEnabled) {
-            screenfull.on('change', handler);
-        }
-        return () => {
-            if (screenfull.isEnabled) screenfull.off('change', handler);
-        };
+        const handler = () => setIsFullscreen(screenfull.isFullscreen);
+        if (screenfull.isEnabled) screenfull.on('change', handler);
+        return () => { if (screenfull.isEnabled) screenfull.off('change', handler); };
     }, []);
-
-    const handleEnded = () => {
-        if (screenfull.isFullscreen) screenfull.exit();
-    };
-
 
     return (
         <motion.div
@@ -669,280 +574,331 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 )}
             </div>
 
-            <div className="w-full max-w-6xl grid lg:grid-cols-4 gap-8 items-start relative z-10">
-                <div className="lg:col-span-3 space-y-6">
-                    <div
-                        ref={playerContainerRef}
-                        className={`relative rounded-3xl overflow-hidden glass-card neon-border aspect-video group ${isFullscreen ? 'w-full h-full' : ''} shadow-2xl shadow-black/50`}
+            <div className="w-full max-w-6xl mx-auto space-y-6 relative z-10">
+                <div className="flex justify-end">
+                    <button
+                        onClick={toggleFullscreen}
+                        className="p-2 bg-white/5 border border-white/10 rounded-xl text-white/60 hover:text-white hover:bg-white/10 transition-all cursor-pointer flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
+                        title="Pantalla Completa"
                     >
-                        {masterKind === 'youtube' && karaokeVideoId ? (
-                            <div className="w-full h-full relative z-20 bg-black">
-                                {/* MASTER PLAYER (Karaoke) */}
-                                <div id="youtube-player-master" className="w-full h-full" />
-                            </div>
-                        ) : masterKind === 'local' && karaokeLocalTrack ? (
-                            // Local decks have no native browser chrome (Web Audio only) — a
-                            // minimal custom transport replaces the missing iframe controls.
-                            <div className="w-full h-full flex flex-col items-center justify-center bg-black/60 gap-5 p-8">
-                                <Music size={48} className="text-neon-pink" />
-                                <div className="text-center">
-                                    <p className="text-white font-bold text-lg">{karaokeLocalTrack.titulo}</p>
-                                    {karaokeLocalTrack.artista && <p className="text-white/50 text-sm">{karaokeLocalTrack.artista}</p>}
-                                </div>
-                                <button
-                                    onClick={toggleMasterPlay}
-                                    className="p-4 rounded-full bg-neon-pink text-white hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-lg shadow-[#FF3B81]/30"
-                                >
-                                    {masterIsPlaying ? <Pause size={28} /> : <Play size={28} />}
-                                </button>
-                                <div className="w-full max-w-sm flex items-center gap-3">
-                                    <span className="text-xs text-white/50 font-mono">{formatTime(masterCurrentTime)}</span>
-                                    <input
-                                        type="range"
-                                        min={0}
-                                        max={masterDuration || 0}
-                                        step={0.1}
-                                        value={masterCurrentTime}
-                                        onChange={(e) => seekMaster(parseFloat(e.target.value))}
-                                        className="flex-1 accent-[#FF3B81] cursor-pointer"
-                                    />
-                                    <span className="text-xs text-white/50 font-mono">{formatTime(masterDuration)}</span>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center bg-black/60 gap-4">
-                                <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-neon-pink border-r-transparent"></div>
-                                <p className="text-white font-bold tracking-widest animate-pulse">BUSCANDO PISTAS...</p>
-                            </div>
-                        )}
+                        {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} Pantalla Completa
+                    </button>
+                </div>
 
-                        {/* SLAVE PLAYER (Original Voice) - Hidden (both YouTube and local use the
-                            same off-screen container; the local adapter has no DOM element of its
-                            own, so this stays empty for it, but the id is only needed by the
-                            YouTube branch) */}
-                        <div style={{ width: 1, height: 1, opacity: 0, position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}>
-                            <div id="youtube-player-slave" />
-                        </div>
+                <div ref={videoRowRef} className="grid md:grid-cols-2 gap-6 bg-[#0a0a0a]">
+                    <DeckPanel
+                        label="DECK A"
+                        accent="pink"
+                        videoElementId="youtube-player-deck-a"
+                        kind={deckAKind}
+                        localTrack={deckALocalTrack}
+                        loadingInitial={loading && !deckAVideoId}
+                        isPlaying={deckAIsPlaying}
+                        currentTime={deckACurrentTime}
+                        duration={deckADuration}
+                        onSeek={seekDeckA}
+                        onCue={handleCueA}
+                        onSet={handleSetA}
+                        onPlay={handlePlayA}
+                        onStop={handleStopA}
+                        pitch={deckAPitch}
+                        tempo={deckATempo}
+                        onPitchChange={setDeckAPitch}
+                        onTempoChange={setDeckATempo}
+                        youtubeVideos={deckAAlternatives}
+                        youtubeSelectedId={deckAVideoId}
+                        onSelectYoutube={selectDeckAYoutube}
+                        onSearchResults={setDeckAAlternatives}
+                        localTracks={localTracks}
+                        onSelectLocal={selectDeckALocal}
+                        onUpload={uploadLocalTrack}
+                        uploading={uploadingLocal}
+                    />
+                    <DeckPanel
+                        label="DECK B"
+                        accent="blue"
+                        videoElementId="youtube-player-deck-b"
+                        kind={deckBKind}
+                        localTrack={deckBLocalTrack}
+                        isPlaying={deckBIsPlaying}
+                        currentTime={deckBCurrentTime}
+                        duration={deckBDuration}
+                        onSeek={seekDeckB}
+                        onCue={handleCueB}
+                        onSet={handleSetB}
+                        onPlay={handlePlayB}
+                        onStop={handleStopB}
+                        pitch={deckBPitch}
+                        tempo={deckBTempo}
+                        onPitchChange={setDeckBPitch}
+                        onTempoChange={setDeckBTempo}
+                        youtubeVideos={deckBAlternatives}
+                        youtubeSelectedId={deckBVideoId}
+                        onSelectYoutube={selectDeckBYoutube}
+                        onSearchResults={setDeckBAlternatives}
+                        localTracks={localTracks}
+                        onSelectLocal={selectDeckBLocal}
+                        onUpload={uploadLocalTrack}
+                        uploading={uploadingLocal}
+                    />
+                </div>
 
-                        {!isFullscreen && (
-                            <div
-                                className="absolute bottom-4 right-4 z-50 pointer-events-auto"
-                                onClick={(e) => { e.stopPropagation(); }}
-                            >
-                                <button
-                                    onClick={toggleFullscreen}
-                                    className="p-3 bg-black/60 backdrop-blur-md rounded-xl text-white opacity-50 group-hover:opacity-100 transition-opacity hover:scale-110 cursor-pointer"
-                                    title="Pantalla Completa"
-                                >
-                                    <Maximize2 size={24} />
-                                </button>
-                            </div>
-                        )}
-                        {isFullscreen && (
-                            <button
-                                onClick={toggleFullscreen}
-                                className="absolute top-4 right-4 p-3 bg-black/60 backdrop-blur-md rounded-xl text-white hover:scale-110 z-50 cursor-pointer"
-                                title="Salir Pantalla Completa"
-                            >
-                                <Minimize2 size={24} />
-                            </button>
-                        )}
-                    </div>
-
-                    {/* DJ MIXER CONTROLS */}
-                    <div className="space-y-4">
-                        <div className="glass-card p-6 rounded-3xl border border-white/5 flex flex-col md:flex-row items-center gap-8 justify-between bg-black/40 backdrop-blur-xl">
-                            <button
-                                onClick={() => setAssistLevel(0)}
-                                className={`flex flex-col items-center gap-1 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 0 ? "bg-neon-pink text-white shadow-lg shadow-[#FF3B81]/30" : "text-white/50 hover:bg-white/10"}`}
-                            >
-                                <span className="text-[9px] opacity-70">DECK A</span>
-                                <span className="flex items-center gap-2"><Mic2 size={18} /> Solo Karaoke</span>
-                            </button>
-
-                            <div className="flex-1 w-full max-w-md flex flex-col items-center gap-3">
-                                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-neon-blue">
-                                    <Volume2 size={14} />
-                                    <span>Mezclador Crossfader</span>
-                                </div>
-                                <div className="relative w-full h-3 bg-gray-800 rounded-full overflow-hidden">
-                                    <div
-                                        className="absolute top-0 left-0 h-full bg-linear-to-r from-[#FF3B81] to-[#00B7ED]"
-                                        style={{ width: `${assistLevel * 100}%` }}
-                                    />
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max="1"
-                                        step="0.01"
-                                        value={assistLevel}
-                                        onChange={(e) => setAssistLevel(parseFloat(e.target.value))}
-                                        className="absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer"
-                                    />
-                                </div>
-                                <div className="flex justify-between w-full text-[10px] font-bold text-white/30 uppercase tracking-widest">
-                                    <span>Pista</span>
-                                    <span>Mezcla</span>
-                                    <span>Voz Original</span>
-                                </div>
-                            </div>
-
-                            <button
-                                onClick={() => setAssistLevel(1)}
-                                className={`flex flex-col items-center gap-1 text-sm font-bold uppercase tracking-widest transition-all cursor-pointer px-4 py-2 rounded-xl ${assistLevel === 1 ? "bg-neon-blue text-white shadow-lg shadow-[#00B7ED]/30" : "text-white/50 hover:bg-white/10"}`}
-                            >
-                                <span className="text-[9px] opacity-70">DECK B</span>
-                                <span className="flex items-center gap-2">Solo Voz Original <Music size={18} /></span>
-                            </button>
-                        </div>
-
-                        {/* VOL A / VOL B TRIM SLIDERS — independent of the crossfader */}
-                        <div className="glass-card p-4 rounded-2xl border border-white/5 grid grid-cols-2 gap-6 bg-black/20">
-                            <div className="space-y-1">
-                                <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-neon-pink">
-                                    <span>Vol A</span><span>{volA}%</span>
-                                </div>
-                                <input
-                                    type="range" min="0" max="100" step="1" value={volA}
-                                    onChange={(e) => setVolA(parseInt(e.target.value))}
-                                    className="w-full accent-[#FF3B81] cursor-pointer"
-                                />
-                            </div>
-                            <div className="space-y-1">
-                                <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-neon-blue">
-                                    <span>Vol B</span><span>{volB}%</span>
-                                </div>
-                                <input
-                                    type="range" min="0" max="100" step="1" value={volB}
-                                    onChange={(e) => setVolB(parseInt(e.target.value))}
-                                    className="w-full accent-[#00B7ED] cursor-pointer"
-                                />
-                            </div>
-                        </div>
-
-                        {/* PITCH / TEMPO — only real for local decks; a YouTube iframe never
-                            exposes raw audio to the Web Audio API, so it's disabled there. */}
-                        <div className="glass-card p-4 rounded-2xl border border-white/5 grid grid-cols-2 gap-6 bg-black/20">
-                            <PitchTempoControls
-                                label="Deck A"
-                                enabled={masterKind === 'local'}
-                                pitch={karaokePitch}
-                                tempo={karaokeTempo}
-                                onPitchChange={setKaraokePitch}
-                                onTempoChange={setKaraokeTempo}
-                                accent="pink"
-                            />
-                            <PitchTempoControls
-                                label="Deck B"
-                                enabled={slaveKind === 'local'}
-                                pitch={originalPitch}
-                                tempo={originalTempo}
-                                onPitchChange={setOriginalPitch}
-                                onTempoChange={setOriginalTempo}
-                                accent="blue"
-                            />
-                        </div>
-
-                        {/* MANUAL SYNC CONTROLS */}
-                        {(originalVideoId || originalLocalTrack) && (
-                            <div className="glass-card p-3 rounded-xl border border-white/5 flex flex-wrap items-center justify-center gap-4 bg-black/20 animate-in slide-in-from-top-2">
-                                <span className="text-xs font-bold uppercase tracking-widest text-white/60 flex items-center gap-2">
-                                    <Settings2 size={14} /> Ajuste de Sincronización:
-                                    <span className="text-neon-blue bg-white/5 px-2 py-0.5 rounded-sm font-mono">{syncOffset > 0 ? '+' : ''}{syncOffset.toFixed(1)}s</span>
-                                </span>
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        onClick={() => setSyncOffset(prev => Math.round((prev - 0.5) * 10) / 10)}
-                                        className="px-3 py-1 bg-white/10 rounded-lg text-xs font-bold hover:bg-white/20 transition-colors border border-white/5"
-                                        title="Retrasar Voz 0.5s"
-                                    >
-                                        -0.5s
-                                    </button>
-                                    <button
-                                        onClick={() => setSyncOffset(prev => Math.round((prev - 0.1) * 10) / 10)}
-                                        className="px-3 py-1 bg-white/10 rounded-lg text-xs font-bold hover:bg-white/20 transition-colors border border-white/5"
-                                        title="Retrasar Voz 0.1s"
-                                    >
-                                        -0.1s
-                                    </button>
-                                    <button
-                                        onClick={() => setSyncOffset(0)}
-                                        className="px-3 py-1 bg-white/5 rounded-lg text-xs text-white/40 font-bold hover:bg-white/10 transition-colors border border-white/5"
-                                        title="Resetear Sincronización"
-                                    >
-                                        Reset
-                                    </button>
-                                    <button
-                                        onClick={() => setSyncOffset(prev => Math.round((prev + 0.1) * 10) / 10)}
-                                        className="px-3 py-1 bg-white/10 rounded-lg text-xs font-bold hover:bg-white/20 transition-colors border border-white/5"
-                                        title="Adelantar Voz 0.1s"
-                                    >
-                                        +0.1s
-                                    </button>
-                                    <button
-                                        onClick={() => setSyncOffset(prev => Math.round((prev + 0.5) * 10) / 10)}
-                                        className="px-3 py-1 bg-white/10 rounded-lg text-xs font-bold hover:bg-white/20 transition-colors border border-white/5"
-                                        title="Adelantar Voz 0.5s"
-                                    >
-                                        +0.5s
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="flex flex-wrap gap-4 justify-center pt-4">
+                {/* MIXER STRIP */}
+                <div className="glass-card p-6 rounded-3xl border border-white/5 bg-black/40 backdrop-blur-xl space-y-6">
+                    <div className="flex flex-col md:flex-row items-center gap-8 justify-between">
                         <button
-                            onClick={onBack}
-                            className="px-6 py-3 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer hover:shadow-lg hover:shadow-white/5 group"
+                            onClick={() => setAssistLevel(0)}
+                            className={`px-4 py-2 rounded-xl text-sm font-bold uppercase tracking-widest transition-all cursor-pointer ${assistLevel === 0 ? "bg-neon-pink text-white shadow-lg shadow-[#FF3B81]/30" : "text-white/50 hover:bg-white/10"}`}
                         >
-                            <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" /> Menú Principal
+                            Solo Deck A
+                        </button>
+
+                        <div className="flex-1 w-full max-w-md flex flex-col items-center gap-3">
+                            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-neon-blue">
+                                <Volume2 size={14} />
+                                <span>Crossfader</span>
+                            </div>
+                            <div className="relative w-full h-3 bg-gray-800 rounded-full overflow-hidden">
+                                <div
+                                    className="absolute top-0 left-0 h-full bg-linear-to-r from-[#FF3B81] to-[#00B7ED]"
+                                    style={{ width: `${assistLevel * 100}%` }}
+                                />
+                                <input
+                                    type="range" min="0" max="1" step="0.01" value={assistLevel}
+                                    onChange={(e) => setAssistLevel(parseFloat(e.target.value))}
+                                    className="absolute top-0 left-0 w-full h-full opacity-0 cursor-pointer"
+                                />
+                            </div>
+                            <div className="flex justify-between items-center w-full text-[10px] font-bold text-white/30 uppercase tracking-widest">
+                                <span>A</span>
+                                <button onClick={() => setAssistLevel(0.5)} className="hover:text-white/70 cursor-pointer transition-colors">50</button>
+                                <span>B</span>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={() => setAssistLevel(1)}
+                            className={`px-4 py-2 rounded-xl text-sm font-bold uppercase tracking-widest transition-all cursor-pointer ${assistLevel === 1 ? "bg-neon-blue text-white shadow-lg shadow-[#00B7ED]/30" : "text-white/50 hover:bg-white/10"}`}
+                        >
+                            Solo Deck B
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-6">
+                        <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-neon-pink">
+                                <span>Vol A</span><span>{volA}%</span>
+                            </div>
+                            <input
+                                type="range" min="0" max="100" step="1" value={volA}
+                                onChange={(e) => setVolA(parseInt(e.target.value))}
+                                className="w-full accent-[#FF3B81] cursor-pointer"
+                            />
+                        </div>
+                        <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-neon-blue">
+                                <span>Vol B</span><span>{volB}%</span>
+                            </div>
+                            <input
+                                type="range" min="0" max="100" step="1" value={volB}
+                                onChange={(e) => setVolB(parseInt(e.target.value))}
+                                className="w-full accent-[#00B7ED] cursor-pointer"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-center gap-3">
+                        <button
+                            onClick={igualarBtoA}
+                            disabled={!igualarEnabled}
+                            title="Copia el tono del Deck B al Deck A"
+                            className="flex items-center gap-2 px-3 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-widest text-white/70 cursor-pointer transition-all"
+                        >
+                            <ArrowLeftRight size={14} /> Igualar B→A
                         </button>
                         <button
-                            onClick={onNext}
-                            className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
+                            onClick={igualarAtoB}
+                            disabled={!igualarEnabled}
+                            title="Copia el tono del Deck A al Deck B"
+                            className="flex items-center gap-2 px-3 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-widest text-white/70 cursor-pointer transition-all"
                         >
-                            <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
+                            <ArrowLeftRight size={14} /> Igualar A→B
+                        </button>
+                        <button
+                            onClick={() => setAutoCue(v => !v)}
+                            className={`px-3 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all border ${autoCue ? 'bg-neon-blue/20 border-neon-blue/40 text-white' : 'bg-white/5 border-white/5 text-white/50'}`}
+                        >
+                            Auto Cue {autoCue ? 'ON' : 'OFF'}
+                        </button>
+                        <button
+                            onClick={() => setAutoCrossfade(v => !v)}
+                            className={`px-3 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all border ${autoCrossfade ? 'bg-neon-pink/20 border-neon-pink/40 text-white' : 'bg-white/5 border-white/5 text-white/50'}`}
+                        >
+                            Auto Crossfade {autoCrossfade ? 'ON' : 'OFF'}
+                        </button>
+                        <button
+                            onClick={openExternalMonitor}
+                            title="Enviar el deck que está en air a una segunda pantalla"
+                            className="flex items-center gap-2 px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-widest text-white/70 cursor-pointer transition-all"
+                        >
+                            <MonitorPlay size={14} /> Pantalla Externa
                         </button>
                     </div>
                 </div>
 
-                <div className="space-y-6">
-                    <DeckSourcePanel
-                        label="Deck A · Pista Karaoke"
-                        icon={<Mic2 size={16} />}
-                        accent="pink"
-                        kind={masterKind}
-                        youtubeVideos={alternatives}
-                        youtubeSelectedId={karaokeVideoId}
-                        onSelectYoutube={selectKaraokeYoutube}
-                        onSearchResults={setAlternatives}
-                        localTracks={localTracks}
-                        localSelectedId={karaokeLocalTrack?.id ?? null}
-                        onSelectLocal={selectKaraokeLocal}
-                        onUpload={uploadLocalTrack}
-                        uploading={uploadingLocal}
-                    />
-                    <DeckSourcePanel
-                        label="Deck B · Voz Original"
-                        icon={<Music size={16} />}
-                        accent="blue"
-                        kind={slaveKind}
-                        youtubeVideos={originalAlternatives}
-                        youtubeSelectedId={originalVideoId}
-                        onSelectYoutube={selectOriginalYoutube}
-                        onSearchResults={setOriginalAlternatives}
-                        localTracks={localTracks}
-                        localSelectedId={originalLocalTrack?.id ?? null}
-                        onSelectLocal={selectOriginalLocal}
-                        onUpload={uploadLocalTrack}
-                        uploading={uploadingLocal}
-                    />
+                <div className="flex flex-wrap gap-4 justify-center pt-2">
+                    <button
+                        onClick={onBack}
+                        className="px-6 py-3 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer hover:shadow-lg hover:shadow-white/5 group"
+                    >
+                        <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" /> Menú Principal
+                    </button>
+                    <button
+                        onClick={onNext}
+                        className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
+                    >
+                        <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
+                    </button>
                 </div>
             </div>
         </motion.div>
     );
 };
+
+interface DeckPanelProps {
+    label: string;
+    accent: 'pink' | 'blue';
+    videoElementId: string;
+    kind: DeckKind;
+    localTrack: LocalAudioRow | null;
+    loadingInitial?: boolean;
+    isPlaying: boolean;
+    currentTime: number;
+    duration: number;
+    onSeek: (seconds: number) => void;
+    onCue: () => void;
+    onSet: () => void;
+    onPlay: () => void;
+    onStop: () => void;
+    pitch: number;
+    tempo: number;
+    onPitchChange: (n: number) => void;
+    onTempoChange: (n: number) => void;
+    youtubeVideos: VideoResult[];
+    youtubeSelectedId: string | null;
+    onSelectYoutube: (id: string) => void;
+    onSearchResults: (videos: VideoResult[]) => void;
+    localTracks: LocalAudioRow[];
+    onSelectLocal: (track: LocalAudioRow) => void;
+    onUpload: (file: File) => void;
+    uploading: boolean;
+}
+
+// One self-contained deck: video/audio area, shared transport, pitch/tempo, and its
+// own source panel (search YouTube or pick from the local library) — fully independent
+// of the other deck.
+function DeckPanel(props: DeckPanelProps) {
+    const accentText = props.accent === 'pink' ? 'text-neon-pink' : 'text-neon-blue';
+    const accentBg = props.accent === 'pink' ? 'bg-neon-pink' : 'bg-neon-blue';
+    const accentShadow = props.accent === 'pink' ? 'shadow-[#FF3B81]/30' : 'shadow-[#00B7ED]/30';
+    const accentRange = props.accent === 'pink' ? 'accent-[#FF3B81]' : 'accent-[#00B7ED]';
+    const hasTrack = (props.kind === 'youtube' && !!props.youtubeSelectedId) || (props.kind === 'local' && !!props.localTrack);
+
+    return (
+        <div className="space-y-3">
+            <div className={`text-xs font-bold uppercase tracking-widest ${accentText}`}>{props.label}</div>
+
+            <div className="relative rounded-3xl overflow-hidden glass-card neon-border aspect-video shadow-2xl shadow-black/50 bg-black">
+                {props.kind === 'youtube' && props.youtubeSelectedId ? (
+                    <div id={props.videoElementId} className="w-full h-full" />
+                ) : props.kind === 'local' && props.localTrack ? (
+                    <div className="w-full h-full flex flex-col items-center justify-center gap-3 p-6">
+                        <Music size={40} className={accentText} />
+                        <p className="text-white font-bold text-center">{props.localTrack.titulo}</p>
+                        {props.localTrack.artista && <p className="text-white/50 text-sm">{props.localTrack.artista}</p>}
+                    </div>
+                ) : props.loadingInitial ? (
+                    <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+                        <div className={`animate-spin rounded-full h-12 w-12 border-t-4 ${props.accent === 'pink' ? 'border-neon-pink' : 'border-neon-blue'} border-r-transparent`} />
+                        <p className="text-white font-bold text-xs tracking-widest animate-pulse">BUSCANDO PISTA...</p>
+                    </div>
+                ) : (
+                    <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-white/30">
+                        <Music size={32} />
+                        <p className="text-xs font-bold uppercase tracking-widest">Sin pista cargada</p>
+                    </div>
+                )}
+            </div>
+
+            <div className="glass-card p-3 rounded-2xl border border-white/5 bg-black/30 space-y-2">
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-white/40 font-mono w-10 shrink-0">{formatTime(props.currentTime)}</span>
+                    <input
+                        type="range" min={0} max={props.duration || 0} step={0.1}
+                        value={props.currentTime} disabled={!hasTrack}
+                        onChange={(e) => props.onSeek(parseFloat(e.target.value))}
+                        className={`flex-1 ${accentRange} ${hasTrack ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}
+                    />
+                    <span className="text-[10px] text-white/40 font-mono w-10 shrink-0 text-right">{formatTime(props.duration)}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                    <button
+                        onClick={props.onCue} disabled={!hasTrack}
+                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                    >
+                        <SkipBack size={14} /> Cue
+                    </button>
+                    <button
+                        onClick={props.onSet} disabled={!hasTrack}
+                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                    >
+                        <Flag size={14} /> Set
+                    </button>
+                    <button
+                        onClick={props.onPlay} disabled={!hasTrack}
+                        className={`flex flex-col items-center gap-1 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-all ${props.isPlaying ? `${accentBg} text-white shadow-lg ${accentShadow}` : 'bg-white/5 hover:bg-white/10 text-white/70'}`}
+                    >
+                        <Play size={14} /> Play
+                    </button>
+                    <button
+                        onClick={props.onStop} disabled={!hasTrack}
+                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                    >
+                        <Square size={14} /> Stop
+                    </button>
+                </div>
+            </div>
+
+            <div className="glass-card p-4 rounded-2xl border border-white/5 bg-black/20">
+                <PitchTempoControls
+                    label="Tono / Tempo"
+                    enabled={props.kind === 'local'}
+                    pitch={props.pitch}
+                    tempo={props.tempo}
+                    onPitchChange={props.onPitchChange}
+                    onTempoChange={props.onTempoChange}
+                    accent={props.accent}
+                />
+            </div>
+
+            <DeckSourcePanel
+                label="Cargar en este deck"
+                icon={<Music size={16} />}
+                accent={props.accent}
+                kind={props.kind}
+                youtubeVideos={props.youtubeVideos}
+                youtubeSelectedId={props.youtubeSelectedId}
+                onSelectYoutube={props.onSelectYoutube}
+                onSearchResults={props.onSearchResults}
+                localTracks={props.localTracks}
+                localSelectedId={props.localTrack?.id ?? null}
+                onSelectLocal={props.onSelectLocal}
+                onUpload={props.onUpload}
+                uploading={props.uploading}
+            />
+        </div>
+    );
+}
 
 interface VideoOptionsListProps {
     label?: string;
@@ -1056,8 +1012,9 @@ interface SearchBoxProps {
     onSelect: (id: string) => void;
 }
 
-// Manual YouTube search — lets the user override/extend the auto-fetched top-5
-// results per deck, since the automatic match can occasionally pick the wrong video.
+// Manual YouTube search — lets the host load any video into this deck, not just the
+// auto-fetched karaoke top-5 (and is now the only way to load an "original vocal"
+// version, since that's no longer searched/paired automatically).
 function SearchBox({ placeholder, onResults, onSelect }: SearchBoxProps) {
     const toast = useToast();
     const [query, setQuery] = useState('');
@@ -1173,7 +1130,7 @@ interface DeckSourcePanelProps {
     label: string;
     icon: React.ReactNode;
     accent: 'pink' | 'blue';
-    kind: 'youtube' | 'local';
+    kind: DeckKind;
     youtubeVideos: VideoResult[];
     youtubeSelectedId: string | null;
     onSelectYoutube: (id: string) => void;
@@ -1185,10 +1142,10 @@ interface DeckSourcePanelProps {
     uploading: boolean;
 }
 
-// One deck's source panel: a tab switch between searching YouTube (the existing
-// flow) and picking from the local pitch/tempo-capable library (new).
+// One deck's source panel: a tab switch between searching YouTube and picking from
+// the local pitch/tempo-capable library.
 function DeckSourcePanel(props: DeckSourcePanelProps) {
-    const [tab, setTab] = useState<'youtube' | 'local'>(props.kind);
+    const [tab, setTab] = useState<DeckKind>(props.kind);
     const accentActive = props.accent === 'pink' ? 'bg-neon-pink text-white' : 'bg-neon-blue text-white';
 
     return (
