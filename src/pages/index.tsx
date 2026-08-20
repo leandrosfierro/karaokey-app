@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3 } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
@@ -49,7 +49,7 @@ interface SorteoResult {
   id: string;
 }
 
-type ViewState = 'setup' | 'player' | 'cantante';
+type ViewState = 'setup' | 'player' | 'cantante' | 'dj';
 type ModoSorteo = 'completo' | 'cantante';
 
 export default function Home() {
@@ -527,6 +527,15 @@ export default function Home() {
         title="Opciones de Sorteo"
       >
         <Settings2 size={20} className="text-white/60" />
+      </button>
+
+      {/* Mezclador DJ Button — standalone dual-deck player, independent of the sorteo draw */}
+      <button
+        onClick={() => setView('dj')}
+        className="fixed top-20 left-4 z-50 p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+        title="Mezclador DJ"
+      >
+        <Disc3 size={20} className="text-white/60" />
       </button>
 
       {/* Settings Button */}
@@ -1038,7 +1047,7 @@ export default function Home() {
               </button>
             </div>
           </motion.div>
-        ) : (
+        ) : view === 'player' ? (
           <KaraokePlayer
             key={sorteo!.id}
             song={sorteo!.cancion}
@@ -1048,6 +1057,14 @@ export default function Home() {
               setView('setup');
               setTimeout(() => modoTurnos ? siguienteTurno() : pedirSorteo(), 500);
             }}
+          />
+        ) : (
+          // Modo DJ — standalone Prestige Tracks Player, no sorteo dependency: both
+          // decks start empty, loaded from Mi Cancionero / YouTube / Mi Biblioteca.
+          <KaraokePlayer
+            key="dj-mixer"
+            onBack={() => setView('setup')}
+            cancionero={canciones}
           />
         )}
       </AnimatePresence>

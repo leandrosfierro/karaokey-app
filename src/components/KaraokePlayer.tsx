@@ -34,10 +34,13 @@ function formatTime(seconds: number): string {
 // loading a plain (non-"karaoke") search result into the other deck.
 
 interface KaraokePlayerProps {
-    song: { titulo: string; artista?: string };
+    song?: { titulo: string; artista?: string };
     challenge?: string;
     onBack: () => void;
-    onNext: () => void;
+    onNext?: () => void;
+    // The app's saved song list (Cancionero) — lets a standalone DJ session load a
+    // song into either deck without needing a sorteo draw. Omitted in sorteo mode.
+    cancionero?: { titulo: string; artista?: string }[];
 }
 
 interface VideoResult {
@@ -57,6 +60,49 @@ function cancionCacheKey(titulo: string, artista?: string): string {
         .trim();
 }
 
+// Cache-checked karaoke search, shared by the sorteo auto-load (Deck A on mount)
+// and the standalone "Mi Cancionero" loader (either deck, on demand).
+async function searchKaraokeVideo(cancion: { titulo: string; artista?: string }): Promise<{ videoId: string | null; alternatives: VideoResult[] }> {
+    const cacheKey = cancionCacheKey(cancion.titulo, cancion.artista);
+
+    const { data: cached } = await supabase
+        .from('karaokey_video_cache')
+        .select('*')
+        .eq('cancion_key', cacheKey)
+        .maybeSingle();
+
+    if (cached && cached.karaoke_video_id) {
+        return { videoId: cached.karaoke_video_id, alternatives: cached.karaoke_alternatives ?? [] };
+    }
+
+    const kQuery = `${cancion.titulo} ${cancion.artista || ''} karaoke`;
+    const kRes = await fetch(`/api/youtube?q=${encodeURIComponent(kQuery)}`);
+    const kData = await kRes.json();
+
+    if (!kRes.ok) {
+        throw new Error(kData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${kRes.status}`);
+    }
+
+    let karaokeResults: VideoResult[] = [];
+    if (kData.items && kData.items.length > 0) {
+        karaokeResults = kData.items.map((item: any) => ({
+            id: item.id.videoId,
+            title: item.snippet.title,
+            thumbnail: item.snippet.thumbnails.medium.url
+        }));
+    }
+
+    supabase.from('karaokey_video_cache').upsert({
+        cancion_key: cacheKey,
+        karaoke_video_id: karaokeResults[0]?.id ?? null,
+        karaoke_alternatives: karaokeResults,
+    }, { onConflict: 'cancion_key' }).then(({ error }) => {
+        if (error) console.error('[KaraoKey] Failed to cache video search:', error);
+    });
+
+    return { videoId: karaokeResults[0]?.id ?? null, alternatives: karaokeResults };
+}
+
 declare global {
     interface Window {
         onYouTubeIframeAPIReady: () => void;
@@ -67,7 +113,7 @@ declare global {
 type DeckKind = 'youtube' | 'local';
 type DeckLetter = 'A' | 'B';
 
-export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext }) => {
+export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero }) => {
     const toast = useToast();
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -111,6 +157,10 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     // ---- Local audio library (shared by both decks) ----
     const [localTracks, setLocalTracks] = useState<LocalAudioRow[]>([]);
     const [uploadingLocal, setUploadingLocal] = useState(false);
+
+    // Per-deck "loading from Mi Cancionero" indicator (searching YouTube on demand).
+    const [deckASearching, setDeckASearching] = useState(false);
+    const [deckBSearching, setDeckBSearching] = useState(false);
 
     // Refs mirroring latest state so player event callbacks (bound once by the
     // YouTube API, or fired from inside the local adapter) always read current values.
@@ -250,56 +300,51 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const selectDeckBYoutube = (id: string) => { setDeckBKind('youtube'); setDeckBVideoId(id); };
     const selectDeckBLocal = (track: LocalAudioRow) => { setDeckBKind('local'); setDeckBLocalTrack(track); };
 
-    // Fetch the karaoke track for Deck A only. The component is remounted (fresh
-    // state) per song via the `key` prop set by the parent. Deck B starts empty —
-    // the host loads whatever they want into it manually.
+    // "Mi Cancionero" — load a song from the app's own saved list into a deck on
+    // demand (searches/caches exactly like the sorteo auto-load, just triggered
+    // manually and targeting whichever deck the host picked).
+    const loadCancionIntoDeck = async (cancion: { titulo: string; artista?: string }, deck: DeckLetter) => {
+        const setSearching = deck === 'A' ? setDeckASearching : setDeckBSearching;
+        setSearching(true);
+        try {
+            const { videoId, alternatives } = await searchKaraokeVideo(cancion);
+            if (deck === 'A') {
+                setDeckAAlternatives(alternatives);
+                if (videoId) selectDeckAYoutube(videoId);
+            } else {
+                setDeckBAlternatives(alternatives);
+                if (videoId) selectDeckBYoutube(videoId);
+            }
+            if (!videoId) {
+                toast(`No se encontró un video karaoke para "${cancion.titulo}".`, { type: 'error' });
+            }
+        } catch (error) {
+            toast(
+                error instanceof Error && error.message === 'quota_exceeded'
+                    ? 'Se agotó la cuota diaria de búsquedas de YouTube.'
+                    : 'No se pudo buscar el video.',
+                { type: 'error' }
+            );
+        } finally {
+            setSearching(false);
+        }
+    };
+    const loadCancionIntoDeckA = (cancion: { titulo: string; artista?: string }) => loadCancionIntoDeck(cancion, 'A');
+    const loadCancionIntoDeckB = (cancion: { titulo: string; artista?: string }) => loadCancionIntoDeck(cancion, 'B');
+
+    // Fetch the karaoke track for Deck A only, when a song was handed in by a sorteo
+    // draw. The component is remounted (fresh state) per song via the `key` prop set
+    // by the parent. Deck B starts empty — the host loads whatever they want into it
+    // manually. In standalone DJ mode (no `song` prop) this effect never runs — both
+    // decks start empty, same as Deck B always does.
     useEffect(() => {
         const fetchVideos = async () => {
-            if (hasFetched.current) return;
+            if (hasFetched.current || !song) return;
             hasFetched.current = true;
-
-            const cacheKey = cancionCacheKey(song.titulo, song.artista);
-
-            const { data: cached } = await supabase
-                .from('karaokey_video_cache')
-                .select('*')
-                .eq('cancion_key', cacheKey)
-                .maybeSingle();
-
-            if (cached && cached.karaoke_video_id) {
-                setDeckAAlternatives(cached.karaoke_alternatives ?? []);
-                setDeckAVideoId(cached.karaoke_video_id);
-                setLoading(false);
-                return;
-            }
-
             try {
-                const kQuery = `${song.titulo} ${song.artista || ''} karaoke`;
-                const kRes = await fetch(`/api/youtube?q=${encodeURIComponent(kQuery)}`);
-                const kData = await kRes.json();
-
-                if (!kRes.ok) {
-                    throw new Error(kData.reason === 'quota_exceeded' ? 'quota_exceeded' : `YouTube API failed: ${kRes.status}`);
-                }
-
-                let karaokeResults: VideoResult[] = [];
-                if (kData.items && kData.items.length > 0) {
-                    karaokeResults = kData.items.map((item: any) => ({
-                        id: item.id.videoId,
-                        title: item.snippet.title,
-                        thumbnail: item.snippet.thumbnails.medium.url
-                    }));
-                    setDeckAAlternatives(karaokeResults);
-                    setDeckAVideoId(karaokeResults[0].id);
-                }
-
-                supabase.from('karaokey_video_cache').upsert({
-                    cancion_key: cacheKey,
-                    karaoke_video_id: karaokeResults[0]?.id ?? null,
-                    karaoke_alternatives: karaokeResults,
-                }, { onConflict: 'cancion_key' }).then(({ error }) => {
-                    if (error) console.error('[KaraoKey] Failed to cache video search:', error);
-                });
+                const { videoId, alternatives } = await searchKaraokeVideo(song);
+                setDeckAAlternatives(alternatives);
+                if (videoId) setDeckAVideoId(videoId);
             } catch (error) {
                 console.error("[KaraoKey] Error fetching Deck A video:", error);
                 if (error instanceof Error && error.message === 'quota_exceeded') {
@@ -312,10 +357,12 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             }
         };
 
-        if (song.titulo) {
+        if (song?.titulo) {
             fetchVideos();
+        } else {
+            setLoading(false);
         }
-    }, [song.titulo, song.artista, toast]);
+    }, [song, toast]);
 
     // ---- Init/update Deck A ----
     useEffect(() => {
@@ -554,14 +601,25 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 space-y-8 relative z-2000"
         >
             <div className="text-center space-y-4 relative z-10 w-full max-w-4xl">
-                <div className="space-y-1">
-                    <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
-                        ¡A ESCENARIO!
-                    </h2>
-                    <p className="text-white font-bold text-xl tracking-widest text-shadow">
-                        {song.titulo} <span className="opacity-50">—</span> {song.artista || "Desconocido"}
-                    </p>
-                </div>
+                {song ? (
+                    <div className="space-y-1">
+                        <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
+                            ¡A ESCENARIO!
+                        </h2>
+                        <p className="text-white font-bold text-xl tracking-widest text-shadow">
+                            {song.titulo} <span className="opacity-50">—</span> {song.artista || "Desconocido"}
+                        </p>
+                    </div>
+                ) : (
+                    <div className="space-y-1">
+                        <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
+                            PRESTIGE TRACKS PLAYER
+                        </h2>
+                        <p className="text-white/60 font-bold text-sm tracking-widest text-shadow">
+                            MEZCLADOR DJ — Cargá cualquier tema en Deck A o Deck B
+                        </p>
+                    </div>
+                )}
 
                 {challenge && (
                     <motion.div
@@ -613,6 +671,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         onSelectLocal={selectDeckALocal}
                         onUpload={uploadLocalTrack}
                         uploading={uploadingLocal}
+                        cancionero={cancionero}
+                        onLoadFromCancionero={loadCancionIntoDeckA}
+                        searchingCancion={deckASearching}
                     />
                     <DeckPanel
                         label="DECK B"
@@ -640,6 +701,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         onSelectLocal={selectDeckBLocal}
                         onUpload={uploadLocalTrack}
                         uploading={uploadingLocal}
+                        cancionero={cancionero}
+                        onLoadFromCancionero={loadCancionIntoDeckB}
+                        searchingCancion={deckBSearching}
                     />
                 </div>
 
@@ -753,12 +817,14 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     >
                         <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" /> Menú Principal
                     </button>
-                    <button
-                        onClick={onNext}
-                        className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
-                    >
-                        <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
-                    </button>
+                    {onNext && (
+                        <button
+                            onClick={onNext}
+                            className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
+                        >
+                            <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
+                        </button>
+                    )}
                 </div>
             </div>
         </motion.div>
@@ -792,11 +858,14 @@ interface DeckPanelProps {
     onSelectLocal: (track: LocalAudioRow) => void;
     onUpload: (file: File) => void;
     uploading: boolean;
+    cancionero?: { titulo: string; artista?: string }[];
+    onLoadFromCancionero: (cancion: { titulo: string; artista?: string }) => void;
+    searchingCancion: boolean;
 }
 
 // One self-contained deck: video/audio area, shared transport, pitch/tempo, and its
-// own source panel (search YouTube or pick from the local library) — fully independent
-// of the other deck.
+// own source panel (search YouTube, pick from the local library, or load straight
+// from the app's saved Cancionero) — fully independent of the other deck.
 function DeckPanel(props: DeckPanelProps) {
     const accentText = props.accent === 'pink' ? 'text-neon-pink' : 'text-neon-blue';
     const accentBg = props.accent === 'pink' ? 'bg-neon-pink' : 'bg-neon-blue';
@@ -895,6 +964,9 @@ function DeckPanel(props: DeckPanelProps) {
                 onSelectLocal={props.onSelectLocal}
                 onUpload={props.onUpload}
                 uploading={props.uploading}
+                cancionero={props.cancionero}
+                onLoadFromCancionero={props.onLoadFromCancionero}
+                searchingCancion={props.searchingCancion}
             />
         </div>
     );
@@ -1126,6 +1198,8 @@ function LocalTrackList({ tracks, selectedId, onSelect, onUpload, uploading, acc
     );
 }
 
+type SourceTab = DeckKind | 'cancionero';
+
 interface DeckSourcePanelProps {
     label: string;
     icon: React.ReactNode;
@@ -1140,13 +1214,17 @@ interface DeckSourcePanelProps {
     onSelectLocal: (track: LocalAudioRow) => void;
     onUpload: (file: File) => void;
     uploading: boolean;
+    cancionero?: { titulo: string; artista?: string }[];
+    onLoadFromCancionero: (cancion: { titulo: string; artista?: string }) => void;
+    searchingCancion: boolean;
 }
 
-// One deck's source panel: a tab switch between searching YouTube and picking from
-// the local pitch/tempo-capable library.
+// One deck's source panel: a tab switch between searching YouTube, picking from the
+// local pitch/tempo-capable library, or loading straight from the app's Cancionero.
 function DeckSourcePanel(props: DeckSourcePanelProps) {
-    const [tab, setTab] = useState<DeckKind>(props.kind);
+    const [tab, setTab] = useState<SourceTab>(props.kind);
     const accentActive = props.accent === 'pink' ? 'bg-neon-pink text-white' : 'bg-neon-blue text-white';
+    const hasCancionero = !!props.cancionero && props.cancionero.length > 0;
 
     return (
         <div className="space-y-3">
@@ -1154,6 +1232,14 @@ function DeckSourcePanel(props: DeckSourcePanelProps) {
                 {props.icon} {props.label}
             </div>
             <div className="flex gap-2 p-1 bg-white/5 rounded-xl border border-white/5">
+                {hasCancionero && (
+                    <button
+                        onClick={() => setTab('cancionero')}
+                        className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'cancionero' ? accentActive : 'text-white/40 hover:text-white/70'}`}
+                    >
+                        Mi Cancionero
+                    </button>
+                )}
                 <button
                     onClick={() => setTab('youtube')}
                     className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'youtube' ? accentActive : 'text-white/40 hover:text-white/70'}`}
@@ -1167,7 +1253,14 @@ function DeckSourcePanel(props: DeckSourcePanelProps) {
                     Mi Biblioteca
                 </button>
             </div>
-            {tab === 'youtube' ? (
+            {tab === 'cancionero' ? (
+                <CancioneroTrackList
+                    cancionero={props.cancionero ?? []}
+                    onSelect={props.onLoadFromCancionero}
+                    searching={props.searchingCancion}
+                    accent={props.accent}
+                />
+            ) : tab === 'youtube' ? (
                 <div className="space-y-3">
                     <SearchBox placeholder="Buscar en YouTube..." onResults={props.onSearchResults} onSelect={props.onSelectYoutube} />
                     <VideoOptionsList
@@ -1187,6 +1280,48 @@ function DeckSourcePanel(props: DeckSourcePanelProps) {
                     accent={props.accent}
                 />
             )}
+        </div>
+    );
+}
+
+interface CancioneroTrackListProps {
+    cancionero: { titulo: string; artista?: string }[];
+    onSelect: (cancion: { titulo: string; artista?: string }) => void;
+    searching: boolean;
+    accent: 'pink' | 'blue';
+}
+
+// Lets the host load a song straight from the app's own saved Cancionero (built via
+// the existing bulk-paste/channel/playlist import) into this deck — searches and
+// caches a karaoke video for it on click, same as the sorteo auto-load does for Deck A.
+function CancioneroTrackList({ cancionero, onSelect, searching, accent }: CancioneroTrackListProps) {
+    const [loadingIndex, setLoadingIndex] = useState<number | null>(null);
+    const accentClasses = accent === 'pink' ? 'hover:border-neon-pink/40' : 'hover:border-neon-blue/40';
+
+    if (cancionero.length === 0) {
+        return <p className="text-xs text-white/30 text-center py-4">Tu cancionero está vacío.</p>;
+    }
+
+    return (
+        <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
+            {cancionero.map((cancion, i) => (
+                <button
+                    key={`${cancion.titulo}-${i}`}
+                    onClick={() => { setLoadingIndex(i); onSelect(cancion); }}
+                    disabled={searching}
+                    className={`w-full text-left flex items-center gap-3 p-3 rounded-xl transition-all border bg-white/5 border-white/5 ${accentClasses} disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
+                >
+                    {searching && loadingIndex === i ? (
+                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin shrink-0" />
+                    ) : (
+                        <Music size={16} className="shrink-0 text-white/50" />
+                    )}
+                    <span className="text-xs flex-1 min-w-0">
+                        <span className="font-bold line-clamp-1 block">{cancion.titulo}</span>
+                        {cancion.artista && <span className="text-white/40 line-clamp-1 block">{cancion.artista}</span>}
+                    </span>
+                </button>
+            ))}
         </div>
     );
 }
