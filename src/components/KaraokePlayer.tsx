@@ -189,56 +189,86 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         return effA >= effB ? 'A' : 'B';
     };
 
-    // ---- External on-air monitor (second window) ----
+    // ---- External on-air monitor (second window) — a real "Program" output, not
+    // just a preview: once connected, it plays real audio for whichever YouTube
+    // deck(s) are loaded (crossfaded live, same formula as the main mix), and the
+    // main window mutes that same audio so it isn't heard twice. A locally-uploaded
+    // deck's audio can never leave the AudioContext that decoded it, so it always
+    // keeps playing from the main window regardless — the external window can only
+    // show a title card for it, no audio. ----
     const onAirChannelRef = useRef<BroadcastChannel | null>(null);
+    const [externalConnected, setExternalConnected] = useState(false);
+    const lastHeartbeatRef = useRef(0);
+    // Holds the last broadcast 'mix' payload — BroadcastChannel has no history/replay,
+    // so a page that connects (or reconnects) after the last state change would
+    // otherwise sit idle until the next crossfader move. Re-sent on every 'hello'.
+    const mixStateRef = useRef<Record<string, unknown> | null>(null);
+
     useEffect(() => {
         if (typeof BroadcastChannel === 'undefined') return;
-        onAirChannelRef.current = new BroadcastChannel(ON_AIR_CHANNEL);
-        return () => onAirChannelRef.current?.close();
+        const channel = new BroadcastChannel(ON_AIR_CHANNEL);
+        onAirChannelRef.current = channel;
+        channel.onmessage = (event: MessageEvent<{ type: string }>) => {
+            if (event.data?.type === 'hello') {
+                lastHeartbeatRef.current = Date.now();
+                setExternalConnected(true);
+                if (mixStateRef.current) channel.postMessage(mixStateRef.current);
+            }
+        };
+        return () => channel.close();
+    }, []);
+
+    // Drop the connection if the external tab stops sending heartbeats (closed, crashed).
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (lastHeartbeatRef.current && Date.now() - lastHeartbeatRef.current > 7000) {
+                setExternalConnected(false);
+            }
+        }, 1000);
+        return () => clearInterval(interval);
     }, []);
 
     const openExternalMonitor = () => {
         window.open('/pantalla-externa', 'karaokey-external', 'width=960,height=540');
     };
 
-    // Broadcast on-air identity whenever it (or its content) changes.
+    // Broadcast the full mix state (both decks + crossfader) whenever any of it
+    // changes — the external window now runs its own mirrored pair of decks and
+    // crossfades them itself, instead of just displaying a single "winner."
     useEffect(() => {
-        const deck = onAirDeck();
-        const kind = deck === 'A' ? deckAKind : deckBKind;
-        const videoId = deck === 'A' ? deckAVideoId : deckBVideoId;
-        const localTrack = deck === 'A' ? deckALocalTrack : deckBLocalTrack;
-        onAirChannelRef.current?.postMessage({
-            type: 'on-air',
-            deck,
-            kind,
-            videoId,
-            titulo: kind === 'local' ? localTrack?.titulo ?? null : null,
-            artista: kind === 'local' ? localTrack?.artista ?? null : null,
-        });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        const payload = {
+            type: 'mix',
+            assistLevel,
+            volA,
+            volB,
+            deckA: { kind: deckAKind, videoId: deckAVideoId, titulo: deckALocalTrack?.titulo ?? null, artista: deckALocalTrack?.artista ?? null },
+            deckB: { kind: deckBKind, videoId: deckBVideoId, titulo: deckBLocalTrack?.titulo ?? null, artista: deckBLocalTrack?.artista ?? null },
+        };
+        mixStateRef.current = payload;
+        onAirChannelRef.current?.postMessage(payload);
     }, [assistLevel, volA, volB, deckAKind, deckAVideoId, deckALocalTrack, deckBKind, deckBVideoId, deckBLocalTrack]);
 
-    // Periodic time-sync tick for a YouTube deck that's on air, so the external
-    // window's muted mirror doesn't visibly drift out of sync.
+    // Periodic time-sync tick for each YouTube deck, so the external window's
+    // mirrored players don't visibly/audibly drift out of sync over a long song.
     useEffect(() => {
         const interval = setInterval(() => {
-            const deck = onAirDeck();
-            const kind = deck === 'A' ? deckAKind : deckBKind;
-            if (kind !== 'youtube') return;
-            const player = deck === 'A' ? deckAPlayer.current : deckBPlayer.current;
-            const videoId = deck === 'A' ? deckAVideoId : deckBVideoId;
-            if (!deckReady(player) || !videoId) return;
-            onAirChannelRef.current?.postMessage({
-                type: 'sync',
-                deck,
-                videoId,
-                currentTime: player.getCurrentTime(),
-                isPlaying: player.getPlayerState() === 1,
+            (['A', 'B'] as const).forEach((deck) => {
+                const kind = deck === 'A' ? deckAKind : deckBKind;
+                if (kind !== 'youtube') return;
+                const player = deck === 'A' ? deckAPlayer.current : deckBPlayer.current;
+                const videoId = deck === 'A' ? deckAVideoId : deckBVideoId;
+                if (!deckReady(player) || !videoId) return;
+                onAirChannelRef.current?.postMessage({
+                    type: 'sync',
+                    deck,
+                    videoId,
+                    currentTime: player.getCurrentTime(),
+                    isPlaying: player.getPlayerState() === 1,
+                });
             });
         }, 2000);
         return () => clearInterval(interval);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [assistLevel, volA, volB, deckAKind, deckBKind, deckAVideoId, deckBVideoId]);
+    }, [deckAKind, deckBKind, deckAVideoId, deckBVideoId]);
 
     // ---- Load YouTube API just once ----
     useEffect(() => {
@@ -533,19 +563,24 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const igualarBtoA = () => { if (igualarEnabled) setDeckAPitch(deckBPitch); };
     const igualarAtoB = () => { if (igualarEnabled) setDeckBPitch(deckAPitch); };
 
-    // ---- Volume crossfader logic — applies to both decks uniformly ----
+    // ---- Volume crossfader logic — applies to both decks uniformly, except: once
+    // an external "Program" window is connected, a YouTube deck's real audio has
+    // moved there, so it's silenced here to avoid playing twice. Local decks can
+    // never move (see note above `onAirChannelRef`), so they're never muted by this.
     useEffect(() => {
         if (deckAPlayer.current) {
-            const vol = Math.floor((1 - assistLevel) * 100 * (volA / 100));
+            const muted = externalConnected && deckAKind === 'youtube';
+            const vol = muted ? 0 : Math.floor((1 - assistLevel) * 100 * (volA / 100));
             deckAPlayer.current.setVolume(vol);
             if (vol > 0 && deckReady(deckAPlayer.current) && deckAPlayer.current.isMuted()) deckAPlayer.current.unMute();
         }
         if (deckBPlayer.current) {
-            const vol = Math.floor(assistLevel * 100 * (volB / 100));
+            const muted = externalConnected && deckBKind === 'youtube';
+            const vol = muted ? 0 : Math.floor(assistLevel * 100 * (volB / 100));
             deckBPlayer.current.setVolume(vol);
             if (vol > 0 && deckReady(deckBPlayer.current) && deckBPlayer.current.isMuted()) deckBPlayer.current.unMute();
         }
-    }, [assistLevel, volA, volB]);
+    }, [assistLevel, volA, volB, externalConnected, deckAKind, deckBKind]);
 
     // ---- Auto Crossfade: as the on-air deck nears its end, ramp the crossfader
     // over to the other deck (if it has something loaded) ----
@@ -802,7 +837,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         </button>
                         <button
                             onClick={openExternalMonitor}
-                            title="Enviar el deck que está en air a una segunda pantalla"
+                            title="Abrir la salida de aire (Program) en una segunda pantalla, sin controles"
                             className="flex items-center gap-2 px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-widest text-white/70 cursor-pointer transition-all"
                         >
                             <MonitorPlay size={14} /> Pantalla Externa
