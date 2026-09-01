@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
+import { useRouter } from "next/router";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3 } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
+import { TutorialOverlay } from "../components/TutorialOverlay";
+import { ModoPicker } from "../components/ModoPicker";
 import { useToast } from "../components/Toast";
+import { useAuth } from "../lib/auth";
 import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow } from "../lib/supabase";
 
 type Cancion = { titulo: string; artista?: string };
@@ -54,6 +58,16 @@ type ModoSorteo = 'completo' | 'cantante';
 
 export default function Home() {
   const toast = useToast();
+  const router = useRouter();
+  const { user, loading: authLoading, modo, setModo, onboardingDone, markOnboardingDone, signOut } = useAuth();
+  const [showTutorial, setShowTutorial] = useState(false);
+
+  // No session -> straight to the welcome page. Everything below this component
+  // assumes an authenticated user (RLS scopes every karaokey_* table to
+  // auth.uid()), so nothing here fires for a logged-out visitor.
+  useEffect(() => {
+    if (!authLoading && !user) router.replace('/bienvenida');
+  }, [authLoading, user, router]);
   // Source of truth for participantes/canciones/ya-cantó is Supabase, not local
   // state — these rows are the durable record so the list survives clearing the
   // browser, switching devices, etc. Everything else (participantes, canciones,
@@ -82,7 +96,10 @@ export default function Home() {
 
   // Load from Supabase and seed defaults on a brand-new, empty database.
   // modoDuo is just a session preference, not content worth a DB round-trip,
-  // so it stays in localStorage.
+  // so it stays in localStorage. Every table read/written here is scoped to
+  // the signed-in user by RLS (user_id = auth.uid(), defaulted on insert) —
+  // no per-call .eq('user_id', ...) needed, so this waits only for a session
+  // to exist before running.
   /* eslint-disable react-hooks/set-state-in-effect -- env var check is a static,
      one-time boot-time fact, not state derived from props/state each render */
   useEffect(() => {
@@ -92,6 +109,7 @@ export default function Home() {
       setMounted(true);
       return;
     }
+    if (authLoading || !user) return; // wait for a session — RLS has nothing to return without one
 
     let cancelled = false;
     (async () => {
@@ -140,7 +158,7 @@ export default function Home() {
       setMounted(true);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [authLoading, user]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
@@ -513,6 +531,20 @@ export default function Home() {
     );
   }
 
+  // Reached the app with a session but no Simple/Pro choice on record yet —
+  // happens once, right after signup, for accounts that needed email
+  // confirmation (so registro.tsx had no session yet to attach a modo to).
+  // Blocking: the rest of the app reads `modo` to decide what to render.
+  if (modo === undefined) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4 py-12">
+        <div className="max-w-sm w-full">
+          <ModoPicker onPick={setModo} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen py-12 px-4 md:px-6 text-white font-sans overflow-x-hidden relative">
       <Head>
@@ -520,32 +552,59 @@ export default function Home() {
         <meta name="description" content="El sorteador de karaoke más premium para tus fiestas." />
       </Head>
 
-      {/* Opciones de Sorteo Button */}
-      <button
-        onClick={() => setShowOpcionesSorteo(true)}
-        className="fixed top-4 left-4 z-50 p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
-        title="Opciones de Sorteo"
-      >
-        <Settings2 size={20} className="text-white/60" />
-      </button>
+      {/* Top toolbar — in-flow (sticky, not fixed) so these controls reserve real
+          layout space and can never overlap page content at narrow/short
+          viewports. They used to be independently `fixed` at hardcoded pixel
+          offsets, which visibly overlapped the KARAOKEY title on mobile. */}
+      <div className="sticky top-0 z-50 flex items-center justify-between mb-6">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowOpcionesSorteo(true)}
+            className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+            title="Opciones de Sorteo"
+          >
+            <Settings2 size={20} className="text-white/60" />
+          </button>
 
-      {/* Mezclador DJ Button — standalone dual-deck player, independent of the sorteo draw */}
-      <button
-        onClick={() => setView('dj')}
-        className="fixed top-20 left-4 z-50 p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
-        title="Mezclador DJ"
-      >
-        <Disc3 size={20} className="text-white/60" />
-      </button>
+          {/* Mezclador DJ — standalone dual-deck player, Pro only */}
+          {modo === 'pro' && (
+            <button
+              onClick={() => setView('dj')}
+              className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+              title="Mezclador DJ"
+            >
+              <Disc3 size={20} className="text-white/60" />
+            </button>
+          )}
+        </div>
 
-      {/* Settings Button */}
-      <button
-        onClick={() => setShowSettings(true)}
-        className="fixed top-4 right-4 z-50 p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
-        title="Configuración / Importar"
-      >
-        <Users size={20} className="text-white/60" />
-      </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowTutorial(true)}
+            className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+            title="¿Cómo funciona?"
+          >
+            <HelpCircle size={20} className="text-white/60" />
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+            title="Configuración / Importar"
+          >
+            <Users size={20} className="text-white/60" />
+          </button>
+        </div>
+      </div>
+
+      {(showTutorial || !onboardingDone) && (
+        <TutorialOverlay
+          modo={modo}
+          onFinish={() => {
+            setShowTutorial(false);
+            if (!onboardingDone) markOnboardingDone();
+          }}
+        />
+      )}
 
       {/* Opciones de Sorteo Modal */}
       <AnimatePresence>
@@ -732,6 +791,32 @@ export default function Home() {
                     </button>
                   </div>
                 )}
+
+                <div className="pt-4 border-t border-white/10 space-y-3">
+                  <p className="text-sm text-white/60">Tu cuenta: <span className="text-white/90">{user?.email}</span></p>
+
+                  <div className="flex items-center gap-2 p-1 bg-white/5 border border-white/10 rounded-xl">
+                    <button
+                      onClick={() => setModo('simple')}
+                      className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${modo === 'simple' ? 'bg-neon-blue/20 text-white' : 'text-white/40 hover:text-white/70'}`}
+                    >
+                      Simple
+                    </button>
+                    <button
+                      onClick={() => setModo('pro')}
+                      className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${modo === 'pro' ? 'bg-neon-pink/20 text-white' : 'text-white/40 hover:text-white/70'}`}
+                    >
+                      Pro
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={() => signOut()}
+                    className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70 hover:text-red-400 transition-colors"
+                  >
+                    <LogOut size={14} /> Cerrar sesión
+                  </button>
+                </div>
               </div>
             </motion.div>
           </motion.div>
@@ -1057,10 +1142,13 @@ export default function Home() {
               setView('setup');
               setTimeout(() => modoTurnos ? siguienteTurno() : pedirSorteo(), 500);
             }}
+            simple={modo === 'simple'}
           />
         ) : (
           // Modo DJ — standalone Prestige Tracks Player, no sorteo dependency: both
           // decks start empty, loaded from Mi Cancionero / YouTube / Mi Biblioteca.
+          // (Only reachable when modo === 'pro' — the toolbar button is hidden
+          // otherwise — so no `simple` prop needed here.)
           <KaraokePlayer
             key="dj-mixer"
             onBack={() => setView('setup')}

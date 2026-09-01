@@ -4,6 +4,7 @@ import screenfull from 'screenfull';
 import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Play, Upload, SkipBack, Flag, Square, ArrowLeftRight, MonitorPlay } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
+import { useAuth } from '../lib/auth';
 import { supabase, LocalAudioRow } from '../lib/supabase';
 import { DeckAdapter, LocalAudioDeckAdapter } from '../lib/deckAdapter';
 
@@ -41,6 +42,10 @@ interface KaraokePlayerProps {
     // The app's saved song list (Cancionero) — lets a standalone DJ session load a
     // song into either deck without needing a sorteo draw. Omitted in sorteo mode.
     cancionero?: { titulo: string; artista?: string }[];
+    // Simple-mode accounts get one single-deck player: no Deck B, no crossfader/
+    // Vol/Igualar/Auto Crossfade row, no Pantalla Externa. Deck A works exactly
+    // as it always has (Cue/Set/Play/Stop, Tono/Tempo, all three source tabs).
+    simple?: boolean;
 }
 
 interface VideoResult {
@@ -113,8 +118,9 @@ declare global {
 type DeckKind = 'youtube' | 'local';
 type DeckLetter = 'A' | 'B';
 
-export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero }) => {
+export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero, simple = false }) => {
     const toast = useToast();
+    const { user } = useAuth();
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [loading, setLoading] = useState(true);
     const videoRowRef = useRef<HTMLDivElement>(null);
@@ -300,10 +306,12 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             toast('El archivo es muy pesado (máx. 25MB).', { type: 'error' });
             return;
         }
+        if (!user) return; // shouldn't happen — this component only mounts once authenticated
         setUploadingLocal(true);
         try {
             const ext = file.name.split('.').pop() || 'mp3';
-            const path = `${crypto.randomUUID()}.${ext}`;
+            // Storage RLS requires objects to live under a `${user.id}/...` prefix.
+            const path = `${user.id}/${crypto.randomUUID()}.${ext}`;
             const { error: uploadError } = await supabase.storage.from(LOCAL_AUDIO_BUCKET).upload(path, file);
             if (uploadError) throw uploadError;
 
@@ -678,7 +686,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     </button>
                 </div>
 
-                <div ref={videoRowRef} className="grid md:grid-cols-2 gap-6 bg-[#0a0a0a]">
+                <div ref={videoRowRef} className={simple ? "grid gap-6 bg-[#0a0a0a] max-w-2xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]"}>
                     <DeckPanel
                         label="DECK A"
                         accent="pink"
@@ -710,39 +718,43 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         onLoadFromCancionero={loadCancionIntoDeckA}
                         searchingCancion={deckASearching}
                     />
-                    <DeckPanel
-                        label="DECK B"
-                        accent="blue"
-                        videoElementId="youtube-player-deck-b"
-                        kind={deckBKind}
-                        localTrack={deckBLocalTrack}
-                        isPlaying={deckBIsPlaying}
-                        currentTime={deckBCurrentTime}
-                        duration={deckBDuration}
-                        onSeek={seekDeckB}
-                        onCue={handleCueB}
-                        onSet={handleSetB}
-                        onPlay={handlePlayB}
-                        onStop={handleStopB}
-                        pitch={deckBPitch}
-                        tempo={deckBTempo}
-                        onPitchChange={setDeckBPitch}
-                        onTempoChange={setDeckBTempo}
-                        youtubeVideos={deckBAlternatives}
-                        youtubeSelectedId={deckBVideoId}
-                        onSelectYoutube={selectDeckBYoutube}
-                        onSearchResults={setDeckBAlternatives}
-                        localTracks={localTracks}
-                        onSelectLocal={selectDeckBLocal}
-                        onUpload={uploadLocalTrack}
-                        uploading={uploadingLocal}
-                        cancionero={cancionero}
-                        onLoadFromCancionero={loadCancionIntoDeckB}
-                        searchingCancion={deckBSearching}
-                    />
+                    {!simple && (
+                        <DeckPanel
+                            label="DECK B"
+                            accent="blue"
+                            videoElementId="youtube-player-deck-b"
+                            kind={deckBKind}
+                            localTrack={deckBLocalTrack}
+                            isPlaying={deckBIsPlaying}
+                            currentTime={deckBCurrentTime}
+                            duration={deckBDuration}
+                            onSeek={seekDeckB}
+                            onCue={handleCueB}
+                            onSet={handleSetB}
+                            onPlay={handlePlayB}
+                            onStop={handleStopB}
+                            pitch={deckBPitch}
+                            tempo={deckBTempo}
+                            onPitchChange={setDeckBPitch}
+                            onTempoChange={setDeckBTempo}
+                            youtubeVideos={deckBAlternatives}
+                            youtubeSelectedId={deckBVideoId}
+                            onSelectYoutube={selectDeckBYoutube}
+                            onSearchResults={setDeckBAlternatives}
+                            localTracks={localTracks}
+                            onSelectLocal={selectDeckBLocal}
+                            onUpload={uploadLocalTrack}
+                            uploading={uploadingLocal}
+                            cancionero={cancionero}
+                            onLoadFromCancionero={loadCancionIntoDeckB}
+                            searchingCancion={deckBSearching}
+                        />
+                    )}
                 </div>
 
-                {/* MIXER STRIP */}
+                {/* MIXER STRIP — Pro only. Simple accounts get one deck, no crossfader,
+                    no Vol A/B, no Igualar/Auto Crossfade, and no Pantalla Externa. */}
+                {!simple && (
                 <div className="glass-card p-6 rounded-3xl border border-white/5 bg-black/40 backdrop-blur-xl space-y-6">
                     <div className="flex flex-col md:flex-row items-center gap-8 justify-between">
                         <button
@@ -844,6 +856,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         </button>
                     </div>
                 </div>
+                )}
 
                 <div className="flex flex-wrap gap-4 justify-center pt-2">
                     <button
