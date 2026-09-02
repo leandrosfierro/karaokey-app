@@ -641,7 +641,13 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 space-y-8 relative z-2000"
+            // No elevated z-index here on purpose: it used to be z-2000, back when the
+            // toolbar's Opciones de Sorteo/Configuración buttons were `fixed` at viewport
+            // corners and needed covering. They're an in-flow sticky toolbar now, so they
+            // no longer overlap this screen — and the old z-2000 was instead outranking
+            // the app's own z-100 modals (Opciones de Sorteo, Configuración) whenever one
+            // was opened from here, rendering them uninteractable underneath the player.
+            className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 space-y-8 relative"
         >
             <div className="text-center space-y-4 relative z-10 w-full max-w-4xl">
                 {song ? (
