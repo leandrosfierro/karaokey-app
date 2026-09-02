@@ -220,8 +220,6 @@ export default function Home() {
           origin: { y: 0.6 },
           colors: ['#FF3B81', '#00B7ED', '#9D4EDD']
         });
-        const audio = new Audio("https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg");
-        audio.play().catch(() => { });
 
         // Show confirmation modal
         setShowWinnerModal(true);
@@ -1145,7 +1143,7 @@ export default function Home() {
             simple={modo === 'simple'}
           />
         ) : (
-          // Modo DJ — standalone Prestige Tracks Player, no sorteo dependency: both
+          // Modo DJ — standalone Karaokey Pro player, no sorteo dependency: both
           // decks start empty, loaded from Mi Cancionero / YouTube / Mi Biblioteca.
           // (Only reachable when modo === 'pro' — the toolbar button is hidden
           // otherwise — so no `simple` prop needed here.)

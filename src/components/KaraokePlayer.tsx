@@ -662,8 +662,11 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 ) : (
                     <div className="space-y-1">
                         <h2 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] to-[#00B7ED] uppercase italic drop-shadow-lg">
-                            PRESTIGE TRACKS PLAYER
+                            Karaokey Pro
                         </h2>
+                        <p className="text-white/40 font-bold text-xs tracking-widest uppercase">
+                            by LSF Producciones
+                        </p>
                         <p className="text-white/60 font-bold text-sm tracking-widest text-shadow">
                             MEZCLADOR DJ — Cargá cualquier tema en Deck A o Deck B
                         </p>
