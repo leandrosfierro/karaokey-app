@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
@@ -910,20 +910,6 @@ export default function Home() {
                   />
                 ) : (
                   <>
-                    {/* Manual Play Button Overlay */}
-                    <div className="absolute -top-12 w-full flex justify-center z-10">
-                      <button
-                        onClick={handleManualStart}
-                        className={`px-6 py-2 rounded-full font-bold text-sm uppercase tracking-widest transition-all ${selectedParticipantes.length === (modoDuo ? 2 : 1) && (modoSorteo === 'cantante' || selectedCancion)
-                          ? 'bg-green-500 text-white shadow-lg hover:scale-105'
-                          : 'bg-white/5 text-white/30 cursor-not-allowed'
-                          }`}
-                        disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || (modoSorteo === 'completo' && !selectedCancion)}
-                      >
-                        {modoSorteo === 'completo' ? 'Ir al Escenario (Manual)' : 'Mostrar Cantante (Manual)'}
-                      </button>
-                    </div>
-
                     <div className="glass-card rounded-3xl p-8 neon-border relative overflow-hidden bg-white/5 backdrop-blur-md border border-white/10">
                       <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
                         <Mic2 size={120} />
@@ -988,6 +974,30 @@ export default function Home() {
                               <Play fill="currentColor" size={20} /> SORTEAR AHORA
                             </>
                           )}
+                        </button>
+
+                        {/* Manual alternative — an in-flow secondary action right under the
+                            automatic one, not an absolutely-positioned overlay (that used to
+                            float above this card at a fixed offset and would end up stuck
+                            behind/between sections whenever the grid stacked to one column on
+                            narrower screens). Selecting a participant (left column) and, in
+                            modoSorteo "completo", a song (right column) enables it. */}
+                        <div className="flex items-center gap-3 text-white/20">
+                          <div className="flex-1 h-px bg-white/10" />
+                          <span className="text-[10px] font-bold uppercase tracking-widest">o elegí manualmente</span>
+                          <div className="flex-1 h-px bg-white/10" />
+                        </div>
+
+                        <button
+                          onClick={handleManualStart}
+                          disabled={selectedParticipantes.length !== (modoDuo ? 2 : 1) || (modoSorteo === 'completo' && !selectedCancion)}
+                          className={`w-full py-3 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all flex items-center justify-center gap-2 border ${selectedParticipantes.length === (modoDuo ? 2 : 1) && (modoSorteo === 'cantante' || selectedCancion)
+                            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25 hover:scale-[1.01] active:scale-[0.99] cursor-pointer'
+                            : 'bg-white/5 border-white/5 text-white/30 cursor-not-allowed'
+                            }`}
+                        >
+                          <MousePointerClick size={16} />
+                          {modoSorteo === 'completo' ? 'Ir al Escenario (Manual)' : 'Mostrar Cantante (Manual)'}
                         </button>
                       </div>
                     </div>
