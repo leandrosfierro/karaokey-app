@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Image from 'next/image';
 import screenfull from 'screenfull';
-import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Play, Upload, SkipBack, Flag, Square, ArrowLeftRight, MonitorPlay } from 'lucide-react';
+import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume2, Play, Pause, Upload, SkipBack, Flag, Square, ArrowLeftRight, MonitorPlay, Check, Search, ListMusic, Library } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
 import { useAuth } from '../lib/auth';
@@ -52,6 +52,7 @@ interface VideoResult {
     id: string;
     title: string;
     thumbnail: string;
+    channel?: string;
 }
 
 // Stable per-song lookup key for the video cache — same song should hit the
@@ -93,7 +94,8 @@ async function searchKaraokeVideo(cancion: { titulo: string; artista?: string })
         karaokeResults = kData.items.map((item: any) => ({
             id: item.id.videoId,
             title: item.snippet.title,
-            thumbnail: item.snippet.thumbnails.medium.url
+            thumbnail: item.snippet.thumbnails.medium.url,
+            channel: item.snippet.channelTitle,
         }));
     }
 
@@ -695,7 +697,10 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     </button>
                 </div>
 
-                <div ref={videoRowRef} className={simple ? "grid gap-6 bg-[#0a0a0a] max-w-2xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]"}>
+                {/* Simple mode has the whole width to itself — a wider column than Pro's
+                    two-up grid gives the single deck's video real prominence instead of
+                    floating in a narrow strip. */}
+                <div ref={videoRowRef} className={simple ? "grid gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]"}>
                     <DeckPanel
                         label="DECK A"
                         accent="pink"
@@ -936,11 +941,28 @@ function DeckPanel(props: DeckPanelProps) {
     const accentRange = props.accent === 'pink' ? 'accent-[#FF3B81]' : 'accent-[#00B7ED]';
     const hasTrack = (props.kind === 'youtube' && !!props.youtubeSelectedId) || (props.kind === 'local' && !!props.localTrack);
 
+    // The main video/thumbnail area is the star of the screen — a stronger glow and a
+    // live pulse while playing gives it real presence instead of blending into the
+    // smaller cards below it (which now deliberately look like a pick-list, not a
+    // second player — see VideoOptionsList/LocalTrackList/CancioneroTrackList).
+    const accentGlow = props.accent === 'pink' ? 'shadow-[#FF3B81]/20' : 'shadow-[#00B7ED]/20';
+    const accentRing = props.accent === 'pink' ? 'ring-neon-pink/50' : 'ring-neon-blue/50';
+
     return (
         <div className="space-y-3">
             <div className={`text-xs font-bold uppercase tracking-widest ${accentText}`}>{props.label}</div>
 
-            <div className="relative rounded-3xl overflow-hidden glass-card neon-border aspect-video shadow-2xl shadow-black/50 bg-black">
+            <div className={`relative rounded-3xl overflow-hidden glass-card neon-border aspect-video shadow-2xl bg-black transition-all ${hasTrack ? `ring-2 ${accentRing} shadow-[0_0_40px_-8px] ${accentGlow}` : 'shadow-black/50'}`}>
+                {/* Always mounted (visibility toggled via opacity, never conditionally
+                    rendered) — the YouTube IFrame API replaces the sibling video div below
+                    with its own <iframe> outside of React's tracking, so a sibling that
+                    mounts/unmounts here (as this badge briefly did) makes React's next
+                    reconciliation try to insertBefore/removeChild against a DOM node it no
+                    longer recognizes, crashing with a NotFoundError. */}
+                <div className={`absolute top-3 left-3 z-10 flex items-center gap-1.5 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full transition-opacity ${props.isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${accentBg} animate-pulse`} />
+                    <span className="text-white text-[10px] font-bold uppercase tracking-widest">Sonando</span>
+                </div>
                 {props.kind === 'youtube' && props.youtubeSelectedId ? (
                     <div id={props.videoElementId} className="w-full h-full" />
                 ) : props.kind === 'local' && props.localTrack ? (
@@ -973,43 +995,49 @@ function DeckPanel(props: DeckPanelProps) {
                     />
                     <span className="text-[10px] text-white/40 font-mono w-10 shrink-0 text-right">{formatTime(props.duration)}</span>
                 </div>
-                <div className="grid grid-cols-4 gap-2">
+                {/* Play/Pause is the primary action — always colored and front-and-center,
+                    unlike Cue/Set/Stop which stay as secondary ghost buttons. Matches how
+                    every real media player weights its controls. */}
+                <div className="grid grid-cols-4 gap-2 items-stretch">
                     <button
                         onClick={props.onCue} disabled={!hasTrack}
-                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                        className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
                     >
                         <SkipBack size={14} /> Cue
                     </button>
                     <button
                         onClick={props.onSet} disabled={!hasTrack}
-                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                        className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
                     >
                         <Flag size={14} /> Set
                     </button>
                     <button
                         onClick={props.onPlay} disabled={!hasTrack}
-                        className={`flex flex-col items-center gap-1 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-all ${props.isPlaying ? `${accentBg} text-white shadow-lg ${accentShadow}` : 'bg-white/5 hover:bg-white/10 text-white/70'}`}
+                        className={`col-span-2 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-all ${hasTrack ? `${accentBg} text-white shadow-lg ${accentShadow} hover:brightness-110 active:scale-[0.98]` : 'bg-white/5 text-white/40'}`}
                     >
-                        <Play size={14} /> Play
-                    </button>
-                    <button
-                        onClick={props.onStop} disabled={!hasTrack}
-                        className="flex flex-col items-center gap-1 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
-                    >
-                        <Square size={14} /> Stop
+                        {props.isPlaying ? <Pause size={16} /> : <Play size={16} />} {props.isPlaying ? 'Pausar' : 'Play'}
                     </button>
                 </div>
+                <button
+                    onClick={props.onStop} disabled={!hasTrack}
+                    className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/50 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                >
+                    <Square size={12} /> Stop
+                </button>
             </div>
 
             {props.onVolumeChange !== undefined && (
-                <div className="glass-card p-4 rounded-2xl border border-white/5 bg-black/20 space-y-1">
-                    <div className={`flex justify-between text-[10px] font-bold uppercase tracking-widest ${accentText}`}>
-                        <span>Volumen</span><span>{props.volume}%</span>
+                <div className={`glass-card p-4 rounded-2xl border-2 space-y-2 ${props.accent === 'pink' ? 'border-neon-pink/20 bg-neon-pink/5' : 'border-neon-blue/20 bg-neon-blue/5'}`}>
+                    <div className="flex items-center justify-between">
+                        <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest ${accentText}`}>
+                            <Volume2 size={16} /> Volumen
+                        </div>
+                        <span className="text-sm font-bold text-white">{props.volume}%</span>
                     </div>
                     <input
                         type="range" min="0" max="100" step="1" value={props.volume}
                         onChange={(e) => props.onVolumeChange!(parseInt(e.target.value))}
-                        className={`w-full ${accentRange} cursor-pointer`}
+                        className={`w-full h-2 ${accentRange} cursor-pointer`}
                     />
                 </div>
             )}
@@ -1057,52 +1085,63 @@ interface VideoOptionsListProps {
     accent: 'pink' | 'blue';
 }
 
+// Deliberately a compact row list — small fixed-size thumbnail + title/channel — the
+// same shape real YouTube search results use, not a second set of big video cards.
+// Full-width aspect-video cards here used to visually compete with (and get mistaken
+// for) the actual player above; a small thumbnail in a list row reads unambiguously
+// as "pick one of these," never as a second player.
 function VideoOptionsList({ label, icon, videos, selectedId, onSelect, accent }: VideoOptionsListProps) {
     if (videos.length === 0) return null;
 
     const accentClasses = accent === 'pink'
-        ? { selected: 'bg-neon-pink/10 border-neon-pink/40 shadow-lg shadow-[#FF3B81]/10', badge: 'bg-neon-pink' }
-        : { selected: 'bg-neon-blue/10 border-neon-blue/40 shadow-lg shadow-[#00B7ED]/10', badge: 'bg-neon-blue' };
+        ? { selected: 'bg-neon-pink/10 border-neon-pink/50', badge: 'bg-neon-pink', border: 'border-l-neon-pink' }
+        : { selected: 'bg-neon-blue/10 border-neon-blue/50', badge: 'bg-neon-blue', border: 'border-l-neon-blue' };
 
     return (
-        <div className="space-y-3">
+        <div className="space-y-2">
             {label && (
                 <div className="flex items-center gap-2 text-white/60 font-bold uppercase text-xs tracking-widest">
                     {icon} {label}
                 </div>
             )}
-            <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
-                {videos.map((video) => (
-                    <button
-                        key={video.id}
-                        onClick={() => onSelect(video.id)}
-                        className={`w-full group text-left space-y-2 p-3 rounded-2xl transition-all border cursor-pointer hover:shadow-lg ${selectedId === video.id
-                            ? accentClasses.selected
-                            : 'bg-white/5 border-white/5 hover:border-white/10 hover:bg-white/10'
-                            }`}
-                    >
-                        <div className="relative aspect-video rounded-xl overflow-hidden pointer-events-none group-hover:scale-[1.02] transition-transform">
-                            <Image
-                                src={video.thumbnail}
-                                alt={video.title}
-                                fill
-                                sizes="(min-width: 1024px) 300px, 100vw"
-                                className="object-cover"
-                                unoptimized
-                            />
-                            {selectedId === video.id && (
-                                <div className={`absolute top-2 right-2 ${accentClasses.badge} text-white text-[10px] font-bold px-2 py-1 rounded-md shadow-lg`}>
-                                    ACTUAL
+            <div className="space-y-1.5 max-h-[280px] overflow-y-auto pr-2 custom-scrollbar">
+                {videos.map((video) => {
+                    const active = selectedId === video.id;
+                    return (
+                        <button
+                            key={video.id}
+                            onClick={() => onSelect(video.id)}
+                            className={`w-full group flex items-center gap-3 p-2 pr-3 rounded-xl transition-all border border-l-4 cursor-pointer text-left ${active
+                                ? `${accentClasses.selected} ${accentClasses.border}`
+                                : 'bg-white/5 border-white/5 border-l-transparent hover:border-white/10 hover:bg-white/10'
+                                }`}
+                        >
+                            <div className="relative w-24 h-14 shrink-0 rounded-lg overflow-hidden pointer-events-none bg-black">
+                                <Image
+                                    src={video.thumbnail}
+                                    alt={video.title}
+                                    fill
+                                    sizes="96px"
+                                    className="object-cover"
+                                    unoptimized
+                                />
+                            </div>
+                            <div className="min-w-0 flex-1 pointer-events-none">
+                                <p className={`text-xs font-bold line-clamp-2 leading-snug ${active ? 'text-white' : 'text-white/70'}`}>
+                                    {video.title}
+                                </p>
+                                {video.channel && (
+                                    <p className="text-[10px] text-white/40 line-clamp-1 mt-0.5">{video.channel}</p>
+                                )}
+                            </div>
+                            {active && (
+                                <div className={`shrink-0 w-5 h-5 rounded-full ${accentClasses.badge} flex items-center justify-center pointer-events-none`}>
+                                    <Check size={12} className="text-white" strokeWidth={3} />
                                 </div>
                             )}
-                        </div>
-                        <div className="px-1 pointer-events-none">
-                            <p className={`text-xs font-bold line-clamp-2 ${selectedId === video.id ? 'text-white' : 'text-white/70'}`}>
-                                {video.title}
-                            </p>
-                        </div>
-                    </button>
-                ))}
+                        </button>
+                    );
+                })}
             </div>
         </div>
     );
@@ -1180,6 +1219,7 @@ function SearchBox({ placeholder, onResults, onSelect }: SearchBoxProps) {
                 id: item.id.videoId,
                 title: item.snippet.title,
                 thumbnail: item.snippet.thumbnails.medium.url,
+                channel: item.snippet.channelTitle,
             }));
             onResults(results);
             if (results.length > 0) onSelect(results[0].id);
@@ -1197,18 +1237,21 @@ function SearchBox({ placeholder, onResults, onSelect }: SearchBoxProps) {
 
     return (
         <div className="flex gap-2">
-            <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
-                placeholder={placeholder}
-                className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder:text-white/30 outline-hidden focus:border-white/30"
-            />
+            <div className="relative flex-1 min-w-0">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 pointer-events-none" />
+                <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') doSearch(); }}
+                    placeholder={placeholder}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder:text-white/30 outline-hidden focus:border-white/30"
+                />
+            </div>
             <button
                 onClick={doSearch}
                 disabled={searching}
-                className="shrink-0 px-3 py-2 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer disabled:opacity-50"
+                className="shrink-0 px-4 py-2.5 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer disabled:opacity-50"
             >
                 {searching ? '...' : 'Buscar'}
             </button>
@@ -1228,8 +1271,8 @@ interface LocalTrackListProps {
 function LocalTrackList({ tracks, selectedId, onSelect, onUpload, uploading, accent }: LocalTrackListProps) {
     const inputRef = useRef<HTMLInputElement>(null);
     const accentClasses = accent === 'pink'
-        ? { selected: 'bg-neon-pink/10 border-neon-pink/40', badge: 'bg-neon-pink' }
-        : { selected: 'bg-neon-blue/10 border-neon-blue/40', badge: 'bg-neon-blue' };
+        ? { selected: 'bg-neon-pink/10 border-neon-pink/50', badge: 'bg-neon-pink', border: 'border-l-neon-pink', icon: 'bg-neon-pink/15 text-neon-pink' }
+        : { selected: 'bg-neon-blue/10 border-neon-blue/50', badge: 'bg-neon-blue', border: 'border-l-neon-blue', icon: 'bg-neon-blue/15 text-neon-blue' };
 
     return (
         <div className="space-y-3">
@@ -1254,20 +1297,27 @@ function LocalTrackList({ tracks, selectedId, onSelect, onUpload, uploading, acc
             {tracks.length === 0 ? (
                 <p className="text-xs text-white/30 text-center py-4">Tu biblioteca está vacía. Subí un MP3/WAV para tener tono y tempo reales.</p>
             ) : (
-                <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
-                    {tracks.map((track) => (
-                        <button
-                            key={track.id}
-                            onClick={() => onSelect(track)}
-                            className={`w-full text-left flex items-center gap-3 p-3 rounded-xl transition-all border cursor-pointer ${selectedId === track.id ? accentClasses.selected : 'bg-white/5 border-white/5 hover:border-white/10 hover:bg-white/10'}`}
-                        >
-                            <Music size={16} className="shrink-0 text-white/50" />
-                            <span className="text-xs font-bold line-clamp-1 flex-1">{track.titulo}</span>
-                            {selectedId === track.id && (
-                                <span className={`${accentClasses.badge} text-white text-[9px] font-bold px-2 py-0.5 rounded-md shrink-0`}>ACTUAL</span>
-                            )}
-                        </button>
-                    ))}
+                <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
+                    {tracks.map((track) => {
+                        const active = selectedId === track.id;
+                        return (
+                            <button
+                                key={track.id}
+                                onClick={() => onSelect(track)}
+                                className={`w-full text-left flex items-center gap-3 p-2.5 pr-3 rounded-xl transition-all border border-l-4 cursor-pointer ${active ? `${accentClasses.selected} ${accentClasses.border}` : 'bg-white/5 border-white/5 border-l-transparent hover:border-white/10 hover:bg-white/10'}`}
+                            >
+                                <div className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${active ? accentClasses.icon : 'bg-white/10 text-white/40'}`}>
+                                    <Music size={16} />
+                                </div>
+                                <span className={`text-xs font-bold line-clamp-1 flex-1 ${active ? 'text-white' : 'text-white/70'}`}>{track.titulo}</span>
+                                {active && (
+                                    <div className={`shrink-0 w-5 h-5 rounded-full ${accentClasses.badge} flex items-center justify-center`}>
+                                        <Check size={12} className="text-white" strokeWidth={3} />
+                                    </div>
+                                )}
+                            </button>
+                        );
+                    })}
                 </div>
             )}
         </div>
@@ -1307,26 +1357,26 @@ function DeckSourcePanel(props: DeckSourcePanelProps) {
             <div className="flex items-center gap-2 text-white/60 font-bold uppercase text-xs tracking-widest">
                 {props.icon} {props.label}
             </div>
-            <div className="flex gap-2 p-1 bg-white/5 rounded-xl border border-white/5">
+            <div className="flex gap-1 p-1 bg-white/5 rounded-xl border border-white/5">
                 {hasCancionero && (
                     <button
                         onClick={() => setTab('cancionero')}
-                        className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'cancionero' ? accentActive : 'text-white/40 hover:text-white/70'}`}
+                        className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'cancionero' ? `${accentActive} shadow-md` : 'text-white/40 hover:text-white/70 hover:bg-white/5'}`}
                     >
-                        Mi Cancionero
+                        <ListMusic size={14} /> Mi Cancionero
                     </button>
                 )}
                 <button
                     onClick={() => setTab('youtube')}
-                    className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'youtube' ? accentActive : 'text-white/40 hover:text-white/70'}`}
+                    className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'youtube' ? `${accentActive} shadow-md` : 'text-white/40 hover:text-white/70 hover:bg-white/5'}`}
                 >
-                    Buscar YouTube
+                    <Search size={14} /> Buscar YouTube
                 </button>
                 <button
                     onClick={() => setTab('local')}
-                    className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'local' ? accentActive : 'text-white/40 hover:text-white/70'}`}
+                    className={`flex-1 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === 'local' ? `${accentActive} shadow-md` : 'text-white/40 hover:text-white/70 hover:bg-white/5'}`}
                 >
-                    Mi Biblioteca
+                    <Library size={14} /> Mi Biblioteca
                 </button>
             </div>
             {tab === 'cancionero' ? (
@@ -1372,32 +1422,42 @@ interface CancioneroTrackListProps {
 // caches a karaoke video for it on click, same as the sorteo auto-load does for Deck A.
 function CancioneroTrackList({ cancionero, onSelect, searching, accent }: CancioneroTrackListProps) {
     const [loadingIndex, setLoadingIndex] = useState<number | null>(null);
-    const accentClasses = accent === 'pink' ? 'hover:border-neon-pink/40' : 'hover:border-neon-blue/40';
+    const accentClasses = accent === 'pink'
+        ? { border: 'hover:border-neon-pink/40', icon: 'group-hover:bg-neon-pink/15 group-hover:text-neon-pink' }
+        : { border: 'hover:border-neon-blue/40', icon: 'group-hover:bg-neon-blue/15 group-hover:text-neon-blue' };
 
     if (cancionero.length === 0) {
         return <p className="text-xs text-white/30 text-center py-4">Tu cancionero está vacío.</p>;
     }
 
     return (
-        <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
-            {cancionero.map((cancion, i) => (
-                <button
-                    key={`${cancion.titulo}-${i}`}
-                    onClick={() => { setLoadingIndex(i); onSelect(cancion); }}
-                    disabled={searching}
-                    className={`w-full text-left flex items-center gap-3 p-3 rounded-xl transition-all border bg-white/5 border-white/5 ${accentClasses} disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
-                >
-                    {searching && loadingIndex === i ? (
-                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin shrink-0" />
-                    ) : (
-                        <Music size={16} className="shrink-0 text-white/50" />
-                    )}
-                    <span className="text-xs flex-1 min-w-0">
-                        <span className="font-bold line-clamp-1 block">{cancion.titulo}</span>
-                        {cancion.artista && <span className="text-white/40 line-clamp-1 block">{cancion.artista}</span>}
-                    </span>
-                </button>
-            ))}
+        <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
+            {cancionero.map((cancion, i) => {
+                const isLoading = searching && loadingIndex === i;
+                return (
+                    <button
+                        key={`${cancion.titulo}-${i}`}
+                        onClick={() => { setLoadingIndex(i); onSelect(cancion); }}
+                        disabled={searching}
+                        className={`w-full group text-left flex items-center gap-3 p-2.5 pr-3 rounded-xl transition-all border bg-white/5 border-white/5 ${accentClasses.border} disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
+                    >
+                        <div className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center bg-white/10 text-white/40 transition-colors ${accentClasses.icon}`}>
+                            {isLoading ? (
+                                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            ) : (
+                                <Music size={16} />
+                            )}
+                        </div>
+                        <span className="text-xs flex-1 min-w-0">
+                            <span className="font-bold line-clamp-1 block text-white/80 group-hover:text-white">{cancion.titulo}</span>
+                            {cancion.artista && <span className="text-white/40 line-clamp-1 block">{cancion.artista}</span>}
+                        </span>
+                        <span className="shrink-0 text-[9px] font-bold uppercase tracking-widest text-white/30 group-hover:text-white/60 transition-colors">
+                            {isLoading ? 'Cargando' : 'Cargar'}
+                        </span>
+                    </button>
+                );
+            })}
         </div>
     );
 }
