@@ -723,6 +723,8 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         cancionero={cancionero}
                         onLoadFromCancionero={loadCancionIntoDeckA}
                         searchingCancion={deckASearching}
+                        volume={simple ? volA : undefined}
+                        onVolumeChange={simple ? setVolA : undefined}
                     />
                     {!simple && (
                         <DeckPanel
@@ -915,6 +917,10 @@ interface DeckPanelProps {
     cancionero?: { titulo: string; artista?: string }[];
     onLoadFromCancionero: (cancion: { titulo: string; artista?: string }) => void;
     searchingCancion: boolean;
+    // Only set for Deck A in Simple mode — Pro mode controls volume via the
+    // mixer strip's Vol A/Vol B sliders instead, so this stays undefined there.
+    volume?: number;
+    onVolumeChange?: (n: number) => void;
 }
 
 // One self-contained deck: video/audio area, shared transport, pitch/tempo, and its
@@ -991,6 +997,19 @@ function DeckPanel(props: DeckPanelProps) {
                     </button>
                 </div>
             </div>
+
+            {props.onVolumeChange !== undefined && (
+                <div className="glass-card p-4 rounded-2xl border border-white/5 bg-black/20 space-y-1">
+                    <div className={`flex justify-between text-[10px] font-bold uppercase tracking-widest ${accentText}`}>
+                        <span>Volumen</span><span>{props.volume}%</span>
+                    </div>
+                    <input
+                        type="range" min="0" max="100" step="1" value={props.volume}
+                        onChange={(e) => props.onVolumeChange!(parseInt(e.target.value))}
+                        className={`w-full ${accentRange} cursor-pointer`}
+                    />
+                </div>
+            )}
 
             <div className="glass-card p-4 rounded-2xl border border-white/5 bg-black/20">
                 <PitchTempoControls
