@@ -564,6 +564,29 @@ export default function Home() {
               <Disc3 size={20} className="text-white/60" />
             </button>
           )}
+
+          {/* Switching modo used to live only inside Configuración — easy to miss,
+              and not reachable at all once you're deep in a screen like the player.
+              This is always in the toolbar (sticky, visible on every screen) so it's
+              a one-tap jump in either direction. */}
+          <button
+            onClick={() => {
+              const next = modo === 'simple' ? 'pro' : 'simple';
+              setModo(next);
+              if (next === 'simple' && view === 'dj') setView('setup');
+              toast(
+                next === 'pro' ? '¡Modo Pro activado! Ya podés mezclar con 2 decks.' : 'Modo Simple activado.',
+                { type: 'success' }
+              );
+            }}
+            className="flex items-center gap-1.5 pl-3 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md text-white/60 hover:text-white"
+            title={modo === 'simple' ? 'Cambiar a Modo Pro' : 'Cambiar a Modo Simple'}
+          >
+            {modo === 'simple' ? <Disc3 size={18} /> : <Mic2 size={18} />}
+            <span className="text-[10px] font-bold uppercase tracking-widest">
+              {modo === 'simple' ? 'Pro' : 'Simple'}
+            </span>
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
