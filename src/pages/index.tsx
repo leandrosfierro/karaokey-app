@@ -14,14 +14,6 @@ import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoR
 
 type Cancion = { titulo: string; artista?: string };
 
-const DEFAULT_PARTICIPANTES = ["Lean", "Caro", "Mati", "Romi"];
-const DEFAULT_CANCIONES: Cancion[] = [
-  { titulo: "De música ligera", artista: "Soda Stereo" },
-  { titulo: "La gloria de Dios", artista: "Ricardo Montaner" },
-  { titulo: "Color Esperanza", artista: "Diego Torres" },
-  { titulo: "Soy Cordobés", artista: "La Mona" }
-];
-
 // "Título - Artista" (used by the one-by-one input and the bulk-paste textarea)
 function parseCancionLine(line: string): Cancion {
   const [t, a] = line.split("-");
@@ -95,7 +87,9 @@ export default function Home() {
   const [modoSorteo, setModoSorteo] = useState<ModoSorteo>('completo');
   const [modoTurnos, setModoTurnos] = useState(false);
 
-  // Load from Supabase and seed defaults on a brand-new, empty database.
+  // Load from Supabase — a brand-new account's tables are genuinely empty
+  // (no demo participantes/canciones seeded into it; the empty-state copy
+  // below, "No hay nadie... todavía", is the real first-run experience).
   // modoDuo is just a session preference, not content worth a DB round-trip,
   // so it stays in localStorage. Every table read/written here is scoped to
   // the signed-in user by RLS (user_id = auth.uid(), defaulted on insert) —
@@ -129,25 +123,8 @@ export default function Home() {
         console.error('[KaraoKey] Supabase load error:', pErr, cErr);
         setLoadError(true);
       } else {
-        if ((pData?.length ?? 0) === 0) {
-          const { data: seededP } = await supabase
-            .from('karaokey_participantes')
-            .insert(DEFAULT_PARTICIPANTES.map((nombre) => ({ nombre })))
-            .select();
-          setParticipanteRows(seededP ?? []);
-        } else {
-          setParticipanteRows(pData!);
-        }
-
-        if ((cData?.length ?? 0) === 0) {
-          const { data: seededC } = await supabase
-            .from('karaokey_canciones')
-            .insert(DEFAULT_CANCIONES.map((c) => ({ titulo: c.titulo, artista: c.artista ?? null })))
-            .select();
-          setCancionRows(seededC ?? []);
-        } else {
-          setCancionRows(cData!);
-        }
+        setParticipanteRows(pData ?? []);
+        setCancionRows(cData ?? []);
       }
 
       const savedDuo = localStorage.getItem("karaokey-modo-duo");
