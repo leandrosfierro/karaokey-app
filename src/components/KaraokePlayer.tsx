@@ -29,6 +29,21 @@ function formatTime(seconds: number): string {
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// iOS Safari (and any iOS WebView, since they all share WebKit there) enforces a real,
+// unfixable platform rule: no JS API may change an HTML5 <video>'s volume — the user's
+// physical hardware buttons are the only way. A YouTube embed's audio is exactly that
+// under the hood, so `player.setVolume()` genuinely does nothing there — this is a
+// documented, longstanding limitation of the YouTube IFrame API on iOS, not a bug in
+// this app. (Local uploads are unaffected: they go through a Web Audio gain node, a
+// different code path iOS doesn't restrict this way.)
+function isIOSDevice(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent;
+    // iPadOS 13+ reports as "Macintosh" but still exposes touch points, unlike a real Mac.
+    const isIPadOS = ua.includes('Macintosh') && typeof document !== 'undefined' && 'ontouchend' in document;
+    return /iPad|iPhone|iPod/.test(ua) || isIPadOS;
+}
+
 // TWO INDEPENDENT DECKS — Deck A/B can each hold any track (YouTube or local upload),
 // mirroring how a real DJ console works. There is no built-in "karaoke + original vocal
 // of the same song" pairing — that's now just something the host can do manually by
@@ -124,6 +139,11 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const toast = useToast();
     const { user } = useAuth();
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // iOS Safari (and some other mobile browsers) refuse the real Fullscreen API for
+    // any element that isn't a <video> tag — Apple only allows it there. When that's
+    // the case, this is a CSS-only "fake fullscreen" fallback (fixed, covers the
+    // viewport) instead of leaving the button doing nothing.
+    const [cssFullscreen, setCssFullscreen] = useState(false);
     const [loading, setLoading] = useState(true);
     const videoRowRef = useRef<HTMLDivElement>(null);
     const hasFetched = useRef(false);
@@ -538,7 +558,11 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         deckAPlayer.current?.pauseVideo();
         setDeckACurrentTime(deckACuePointRef.current);
     };
-    const handlePlayA = () => deckAPlayer.current?.playVideo();
+    // A real Play/Pause toggle — this used to always call playVideo(), which was
+    // invisible while the button only ever said "Play." Once the redesign started
+    // showing a Pause icon/label while playing, clicking it re-called playVideo()
+    // (a no-op on an already-playing deck), so pause silently never happened.
+    const handlePlayA = () => (deckAIsPlaying ? deckAPlayer.current?.pauseVideo() : deckAPlayer.current?.playVideo());
     const handleStopA = () => { deckAPlayer.current?.pauseVideo(); deckAPlayer.current?.seekTo(0, true); setDeckACurrentTime(0); };
     const seekDeckA = (seconds: number) => { deckAPlayer.current?.seekTo(seconds, true); setDeckACurrentTime(seconds); };
 
@@ -548,7 +572,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         deckBPlayer.current?.pauseVideo();
         setDeckBCurrentTime(deckBCuePointRef.current);
     };
-    const handlePlayB = () => deckBPlayer.current?.playVideo();
+    const handlePlayB = () => (deckBIsPlaying ? deckBPlayer.current?.pauseVideo() : deckBPlayer.current?.playVideo());
     const handleStopB = () => { deckBPlayer.current?.pauseVideo(); deckBPlayer.current?.seekTo(0, true); setDeckBCurrentTime(0); };
     const seekDeckB = (seconds: number) => { deckBPlayer.current?.seekTo(seconds, true); setDeckBCurrentTime(seconds); };
 
@@ -628,20 +652,19 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
 
     // screenfull.toggle() returns a promise that can reject (permissions denied,
     // browser quirks, etc.) — it was never awaited/caught before, so a failure was
-    // completely silent: the button visually "did nothing." Now it always tells the
-    // user one way or the other.
+    // completely silent: the button visually "did nothing." Now it either succeeds,
+    // or falls back to the CSS-only fullscreen below, or (only if even that can't
+    // apply) tells the user plainly instead of doing nothing.
     const toggleFullscreen = () => {
         if (!videoRowRef.current || !screenfull.isEnabled) {
-            toast('Tu navegador no permite pantalla completa acá.', { type: 'error' });
+            setCssFullscreen((v) => !v);
             return;
         }
         try {
             const result = screenfull.toggle(videoRowRef.current);
-            result?.catch(() => {
-                toast('No se pudo activar pantalla completa en este navegador.', { type: 'error' });
-            });
+            result?.catch(() => setCssFullscreen((v) => !v));
         } catch {
-            toast('No se pudo activar pantalla completa en este navegador.', { type: 'error' });
+            setCssFullscreen((v) => !v);
         }
     };
 
@@ -700,20 +723,47 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             </div>
 
             <div className="w-full max-w-6xl mx-auto space-y-6 relative z-10">
-                <div className="flex justify-center">
-                    <button
-                        onClick={toggleFullscreen}
-                        className="px-6 py-3 bg-linear-to-r from-neon-pink/20 to-neon-blue/20 border border-white/20 rounded-2xl text-white hover:from-neon-pink/30 hover:to-neon-blue/30 hover:border-white/30 hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-2 text-sm font-bold uppercase tracking-widest shadow-lg"
-                        title="Pantalla Completa"
-                    >
-                        {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />} Pantalla Completa
-                    </button>
-                </div>
+                {!cssFullscreen && (
+                    <div className="flex justify-center">
+                        <button
+                            onClick={toggleFullscreen}
+                            className="px-6 py-3 bg-linear-to-r from-neon-pink/20 to-neon-blue/20 border border-white/20 rounded-2xl text-white hover:from-neon-pink/30 hover:to-neon-blue/30 hover:border-white/30 hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-2 text-sm font-bold uppercase tracking-widest shadow-lg"
+                            title="Pantalla Completa"
+                        >
+                            {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />} Pantalla Completa
+                        </button>
+                    </div>
+                )}
 
                 {/* Simple mode has the whole width to itself — a wider column than Pro's
                     two-up grid gives the single deck's video real prominence instead of
-                    floating in a narrow strip. */}
-                <div ref={videoRowRef} className={simple ? "grid gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]"}>
+                    floating in a narrow strip. cssFullscreen covers the CSS-only fallback
+                    (iOS Safari won't grant real Fullscreen API access to a non-<video>
+                    element) — it can't hide the browser chrome, but it does fill the
+                    screen, so the button does something real there instead of nothing. */}
+                <div
+                    ref={videoRowRef}
+                    className={
+                        cssFullscreen
+                            ? "fixed inset-0 z-9999 bg-black p-4 overflow-y-auto content-start grid gap-6" + (simple ? "" : " md:grid-cols-2")
+                            : (simple ? "grid gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]")
+                    }
+                >
+                    {cssFullscreen && (
+                        // A normal in-flow button, not another `fixed` one — this container
+                        // is itself trapped inside an ancestor with a CSS transform (framer-
+                        // motion's animate={{y:...}}), which makes any `position:fixed`
+                        // descendant behave like `absolute` relative to that ancestor instead
+                        // of truly escaping to the viewport. A fixed exit button here would
+                        // end up wherever that trapped stacking context happens to place it —
+                        // this way it's always exactly where it visually appears, reachable.
+                        <button
+                            onClick={toggleFullscreen}
+                            className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold uppercase tracking-widest cursor-pointer transition-all ${simple ? '' : 'md:col-span-2'}`}
+                        >
+                            <Minimize2 size={16} /> Salir de Pantalla Completa
+                        </button>
+                    )}
                     <DeckPanel
                         label="DECK A"
                         accent="pink"
@@ -1050,6 +1100,11 @@ function DeckPanel(props: DeckPanelProps) {
                             <Square size={14} />
                         </button>
                     </div>
+                    {props.kind === 'youtube' && isIOSDevice() && (
+                        <p className="text-[10px] text-white/40 leading-relaxed px-1">
+                            En iPhone/iPad, Apple no deja que ninguna app web controle el volumen de un video de YouTube — usá los botones físicos de volumen del celular.
+                        </p>
+                    )}
                 </div>
             ) : (
                 <div className="glass-card p-3 rounded-2xl border border-white/5 bg-black/30 space-y-2">
