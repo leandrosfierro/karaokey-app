@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick, Search } from "lucide-react";
 import confetti from "canvas-confetti";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
@@ -87,6 +87,7 @@ export default function Home() {
   const [view, setView] = useState<ViewState>('setup');
   const [selectedParticipantes, setSelectedParticipantes] = useState<string[]>([]);
   const [selectedCancion, setSelectedCancion] = useState<Cancion | null>(null);
+  const [cancionQuery, setCancionQuery] = useState("");
   const [showWinnerModal, setShowWinnerModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showOpcionesSorteo, setShowOpcionesSorteo] = useState(false);
@@ -391,17 +392,6 @@ export default function Home() {
         }
       }
     });
-  };
-
-  const addCancion = async (v: string) => {
-    if (!v.trim()) return;
-    const parsed = parseCancionLine(v);
-    const { data, error } = await supabase.from('karaokey_canciones').insert({ titulo: parsed.titulo, artista: parsed.artista ?? null }).select().single();
-    if (error || !data) {
-      toast('No se pudo guardar la canción.', { type: 'error' });
-      return;
-    }
-    setCancionRows((prev) => [...prev, data]);
   };
 
   const addCancionesBulk = async () => {
@@ -1013,33 +1003,64 @@ export default function Home() {
                 <div className="glass-card rounded-2xl p-4 min-h-[400px] flex flex-col border border-white/5 bg-white/5 backdrop-blur-md">
                   <div className="flex-1 space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                     <AnimatePresence initial={false}>
-                      {canciones.map((c, i) => (
-                        <motion.div
-                          key={`${c.titulo}-${i}`}
-                          onClick={() => setSelectedCancion(selectedCancion === c ? null : c)}
-                          initial={{ x: 20, opacity: 0 }}
-                          animate={{ x: 0, opacity: 1 }}
-                          exit={{ x: -20, opacity: 0 }}
-                          className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${selectedCancion === c
-                            ? 'bg-neon-blue/20 border-neon-blue shadow-[0_0_15px_rgba(0,183,237,0.3)]'
-                            : 'bg-white/5 border-white/5 hover:border-white/10'
-                            }`}
-                        >
-                          <div className="flex flex-col">
-                            <span className="font-medium text-sm leading-tight">{c.titulo}</span>
-                            <span className="text-[10px] opacity-50 uppercase tracking-tighter">{c.artista || "Desconocido"}</span>
-                          </div>
-                          <button onClick={(e) => { e.stopPropagation(); removeCancion(i); }} className="text-white/20 hover:text-red-400 transition-colors">
-                            <Trash2 size={14} />
-                          </button>
-                        </motion.div>
-                      ))}
+                      {canciones
+                        .map((c, i) => ({ c, i }))
+                        .filter(({ c }) => {
+                          const q = cancionQuery.trim().toLowerCase();
+                          if (!q) return true;
+                          return c.titulo.toLowerCase().includes(q) || (c.artista ?? "").toLowerCase().includes(q);
+                        })
+                        .map(({ c, i }) => (
+                          <motion.div
+                            key={`${c.titulo}-${i}`}
+                            onClick={() => setSelectedCancion(selectedCancion === c ? null : c)}
+                            initial={{ x: 20, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            exit={{ x: -20, opacity: 0 }}
+                            className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${selectedCancion === c
+                              ? 'bg-neon-blue/20 border-neon-blue shadow-[0_0_15px_rgba(0,183,237,0.3)]'
+                              : 'bg-white/5 border-white/5 hover:border-white/10'
+                              }`}
+                          >
+                            <div className="flex flex-col">
+                              <span className="font-medium text-sm leading-tight">{c.titulo}</span>
+                              <span className="text-[10px] opacity-50 uppercase tracking-tighter">{c.artista || "Desconocido"}</span>
+                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); removeCancion(i); }} className="text-white/20 hover:text-red-400 transition-colors">
+                              <Trash2 size={14} />
+                            </button>
+                          </motion.div>
+                        ))}
                     </AnimatePresence>
                     {canciones.length === 0 && (
                       <div className="h-full flex items-center justify-center opacity-40 italic text-sm">Agregá tus hits favoritos</div>
                     )}
+                    {canciones.length > 0 && cancionQuery.trim() && !canciones.some((c) => c.titulo.toLowerCase().includes(cancionQuery.trim().toLowerCase()) || (c.artista ?? "").toLowerCase().includes(cancionQuery.trim().toLowerCase())) && (
+                      <div className="py-6 text-center opacity-40 italic text-sm">Ninguna coincide con &quot;{cancionQuery}&quot;</div>
+                    )}
                   </div>
-                  <FormInput icon={<Music size={18} />} placeholder="Título - Artista" onSubmit={addCancion} color="blue" />
+
+                  {/* This used to be an "add one song by typing Título - Artista" input that
+                      silently inserted whatever you typed — easy to mistake for a search box,
+                      since that's exactly what it looked like. It's a real live search/filter
+                      now; actually adding songs (one-by-one, bulk paste, or importing a whole
+                      channel/playlist) lives in Configuración, one tap away below. */}
+                  <div className="relative mt-2">
+                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={cancionQuery}
+                      onChange={(e) => setCancionQuery(e.target.value)}
+                      placeholder="Buscar en tu cancionero..."
+                      className="w-full rounded-xl pl-9 pr-4 py-3 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 transition-all text-sm text-white placeholder:text-white/20 font-sans"
+                    />
+                  </div>
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    className="mt-2 w-full flex items-center justify-center gap-2 p-3 bg-neon-blue/10 hover:bg-neon-blue/20 border border-neon-blue/20 rounded-xl text-xs font-bold uppercase tracking-wider text-neon-blue transition-colors cursor-pointer"
+                  >
+                    <ListPlus size={14} /> Sumar Canciones
+                  </button>
                 </div>
               </div>
             </div>

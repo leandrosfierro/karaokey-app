@@ -626,9 +626,22 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [autoCrossfade, assistLevel, volA, volB, deckACurrentTime, deckADuration, deckBCurrentTime, deckBDuration, deckAVideoId, deckALocalTrack, deckBVideoId, deckBLocalTrack]);
 
+    // screenfull.toggle() returns a promise that can reject (permissions denied,
+    // browser quirks, etc.) — it was never awaited/caught before, so a failure was
+    // completely silent: the button visually "did nothing." Now it always tells the
+    // user one way or the other.
     const toggleFullscreen = () => {
-        if (videoRowRef.current && screenfull.isEnabled) {
-            screenfull.toggle(videoRowRef.current);
+        if (!videoRowRef.current || !screenfull.isEnabled) {
+            toast('Tu navegador no permite pantalla completa acá.', { type: 'error' });
+            return;
+        }
+        try {
+            const result = screenfull.toggle(videoRowRef.current);
+            result?.catch(() => {
+                toast('No se pudo activar pantalla completa en este navegador.', { type: 'error' });
+            });
+        } catch {
+            toast('No se pudo activar pantalla completa en este navegador.', { type: 'error' });
         }
     };
 
@@ -687,13 +700,13 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             </div>
 
             <div className="w-full max-w-6xl mx-auto space-y-6 relative z-10">
-                <div className="flex justify-end">
+                <div className="flex justify-center">
                     <button
                         onClick={toggleFullscreen}
-                        className="p-2 bg-white/5 border border-white/10 rounded-xl text-white/60 hover:text-white hover:bg-white/10 transition-all cursor-pointer flex items-center gap-2 text-xs font-bold uppercase tracking-widest"
+                        className="px-6 py-3 bg-linear-to-r from-neon-pink/20 to-neon-blue/20 border border-white/20 rounded-2xl text-white hover:from-neon-pink/30 hover:to-neon-blue/30 hover:border-white/30 hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-2 text-sm font-bold uppercase tracking-widest shadow-lg"
                         title="Pantalla Completa"
                     >
-                        {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />} Pantalla Completa
+                        {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />} Pantalla Completa
                     </button>
                 </div>
 
@@ -984,68 +997,112 @@ function DeckPanel(props: DeckPanelProps) {
                 )}
             </div>
 
-            <div className="glass-card p-3 rounded-2xl border border-white/5 bg-black/30 space-y-2">
-                <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 font-mono w-10 shrink-0">{formatTime(props.currentTime)}</span>
-                    <input
-                        type="range" min={0} max={props.duration || 0} step={0.1}
-                        value={props.currentTime} disabled={!hasTrack}
-                        onChange={(e) => props.onSeek(parseFloat(e.target.value))}
-                        className={`flex-1 ${accentRange} ${hasTrack ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}
-                    />
-                    <span className="text-[10px] text-white/40 font-mono w-10 shrink-0 text-right">{formatTime(props.duration)}</span>
-                </div>
-                {/* Play/Pause is the primary action — always colored and front-and-center,
-                    unlike Cue/Set/Stop which stay as secondary ghost buttons. Matches how
-                    every real media player weights its controls. */}
-                <div className="grid grid-cols-4 gap-2 items-stretch">
-                    <button
-                        onClick={props.onCue} disabled={!hasTrack}
-                        className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
-                    >
-                        <SkipBack size={14} /> Cue
-                    </button>
-                    <button
-                        onClick={props.onSet} disabled={!hasTrack}
-                        className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
-                    >
-                        <Flag size={14} /> Set
-                    </button>
-                    <button
-                        onClick={props.onPlay} disabled={!hasTrack}
-                        className={`col-span-2 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-all ${hasTrack ? `${accentBg} text-white shadow-lg ${accentShadow} hover:brightness-110 active:scale-[0.98]` : 'bg-white/5 text-white/40'}`}
-                    >
-                        {props.isPlaying ? <Pause size={16} /> : <Play size={16} />} {props.isPlaying ? 'Pausar' : 'Play'}
-                    </button>
-                </div>
-                <button
-                    onClick={props.onStop} disabled={!hasTrack}
-                    className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/50 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
-                >
-                    <Square size={12} /> Stop
-                </button>
-            </div>
-
-            {props.onVolumeChange !== undefined && (
-                <div className={`glass-card p-4 rounded-2xl border-2 space-y-2 ${props.accent === 'pink' ? 'border-neon-pink/20 bg-neon-pink/5' : 'border-neon-blue/20 bg-neon-blue/5'}`}>
-                    <div className="flex items-center justify-between">
-                        <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest ${accentText}`}>
-                            <Volume2 size={16} /> Volumen
-                        </div>
-                        <span className="text-sm font-bold text-white">{props.volume}%</span>
+            {props.onVolumeChange !== undefined ? (
+                // Simple mode — one compact, YouTube-style bar: seek row, then Play/Pause
+                // as a circular primary button with volume inline next to it (mirroring
+                // where YouTube's own player puts them), Cue/Set as small secondary icons,
+                // Stop tucked at the end. Replaces the separate transport/Volumen cards
+                // Pro mode still uses below.
+                <div className="glass-card p-3 rounded-2xl border border-white/5 bg-black/30 space-y-3">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 font-mono w-10 shrink-0">{formatTime(props.currentTime)}</span>
+                        <input
+                            type="range" min={0} max={props.duration || 0} step={0.1}
+                            value={props.currentTime} disabled={!hasTrack}
+                            onChange={(e) => props.onSeek(parseFloat(e.target.value))}
+                            className={`flex-1 ${accentRange} ${hasTrack ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}
+                        />
+                        <span className="text-[10px] text-white/40 font-mono w-10 shrink-0 text-right">{formatTime(props.duration)}</span>
                     </div>
-                    <input
-                        type="range" min="0" max="100" step="1" value={props.volume}
-                        onChange={(e) => props.onVolumeChange!(parseInt(e.target.value))}
-                        className={`w-full h-2 ${accentRange} cursor-pointer`}
-                    />
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={props.onPlay} disabled={!hasTrack}
+                            title={props.isPlaying ? 'Pausar' : 'Play'}
+                            className={`shrink-0 w-12 h-12 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed ${hasTrack ? `${accentBg} text-white shadow-lg ${accentShadow} hover:brightness-110 active:scale-95 cursor-pointer` : 'bg-white/5 text-white/30'}`}
+                        >
+                            {props.isPlaying ? <Pause size={20} /> : <Play size={20} className="ml-0.5" />}
+                        </button>
+                        <button
+                            onClick={props.onCue} disabled={!hasTrack} title="Cue"
+                            className="shrink-0 p-2.5 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/60 cursor-pointer transition-all"
+                        >
+                            <SkipBack size={16} />
+                        </button>
+                        <button
+                            onClick={props.onSet} disabled={!hasTrack} title="Set"
+                            className="shrink-0 p-2.5 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/60 cursor-pointer transition-all"
+                        >
+                            <Flag size={16} />
+                        </button>
+                        <div className="flex-1 flex items-center gap-2 min-w-0 pl-1">
+                            <Volume2 size={16} className={`shrink-0 ${accentText}`} />
+                            <input
+                                type="range" min="0" max="100" step="1" value={props.volume}
+                                onChange={(e) => props.onVolumeChange!(parseInt(e.target.value))}
+                                className={`flex-1 h-1.5 ${accentRange} cursor-pointer`}
+                            />
+                            <span className="shrink-0 text-[10px] font-bold text-white/50 w-8 text-right">{props.volume}%</span>
+                        </div>
+                        <button
+                            onClick={props.onStop} disabled={!hasTrack} title="Stop"
+                            className="shrink-0 p-2.5 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/40 cursor-pointer transition-all"
+                        >
+                            <Square size={14} />
+                        </button>
+                    </div>
+                </div>
+            ) : (
+                <div className="glass-card p-3 rounded-2xl border border-white/5 bg-black/30 space-y-2">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 font-mono w-10 shrink-0">{formatTime(props.currentTime)}</span>
+                        <input
+                            type="range" min={0} max={props.duration || 0} step={0.1}
+                            value={props.currentTime} disabled={!hasTrack}
+                            onChange={(e) => props.onSeek(parseFloat(e.target.value))}
+                            className={`flex-1 ${accentRange} ${hasTrack ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}
+                        />
+                        <span className="text-[10px] text-white/40 font-mono w-10 shrink-0 text-right">{formatTime(props.duration)}</span>
+                    </div>
+                    {/* Play/Pause is the primary action — always colored and front-and-center,
+                        unlike Cue/Set/Stop which stay as secondary ghost buttons. Matches how
+                        every real media player weights its controls. */}
+                    <div className="grid grid-cols-4 gap-2 items-stretch">
+                        <button
+                            onClick={props.onCue} disabled={!hasTrack}
+                            className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                        >
+                            <SkipBack size={14} /> Cue
+                        </button>
+                        <button
+                            onClick={props.onSet} disabled={!hasTrack}
+                            className="flex flex-col items-center justify-center gap-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/70 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                        >
+                            <Flag size={14} /> Set
+                        </button>
+                        <button
+                            onClick={props.onPlay} disabled={!hasTrack}
+                            className={`col-span-2 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-all ${hasTrack ? `${accentBg} text-white shadow-lg ${accentShadow} hover:brightness-110 active:scale-[0.98]` : 'bg-white/5 text-white/40'}`}
+                        >
+                            {props.isPlaying ? <Pause size={16} /> : <Play size={16} />} {props.isPlaying ? 'Pausar' : 'Play'}
+                        </button>
+                    </div>
+                    <button
+                        onClick={props.onStop} disabled={!hasTrack}
+                        className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed text-white/50 text-[10px] font-bold uppercase tracking-widest cursor-pointer transition-all"
+                    >
+                        <Square size={12} /> Stop
+                    </button>
                 </div>
             )}
 
+            {/* YouTube never exposes decoded audio to the page (no JS API can), so pitch/
+                tempo can only ever work on local uploads — showing a permanently-disabled
+                slider for YouTube decks was just clutter with no path to working. Hidden
+                outright instead of shown-and-greyed-out. */}
+            {props.kind === 'local' && (
             <div className="glass-card p-4 rounded-2xl border border-white/5 bg-black/20">
                 <PitchTempoControls
                     label="Tono / Tempo"
-                    enabled={props.kind === 'local'}
                     pitch={props.pitch}
                     tempo={props.tempo}
                     onPitchChange={props.onPitchChange}
@@ -1053,6 +1110,7 @@ function DeckPanel(props: DeckPanelProps) {
                     accent={props.accent}
                 />
             </div>
+            )}
 
             <DeckSourcePanel
                 label="Cargar en este deck"
@@ -1149,7 +1207,6 @@ function VideoOptionsList({ label, icon, videos, selectedId, onSelect, accent }:
 
 interface PitchTempoControlsProps {
     label: string;
-    enabled: boolean;
     pitch: number;
     tempo: number;
     onPitchChange: (n: number) => void;
@@ -1157,26 +1214,27 @@ interface PitchTempoControlsProps {
     accent: 'pink' | 'blue';
 }
 
-// Real pitch (±12 semitones) / tempo (%) controls — only functional for local decks.
+// Real pitch (±12 semitones) / tempo (%) controls — only ever rendered for local decks
+// (the caller hides this entirely for YouTube ones), so always enabled here.
 // A YouTube iframe embed never exposes decoded audio to the page, so these stay
 // disabled (and clearly labeled) whenever that deck is playing from YouTube.
-function PitchTempoControls({ label, enabled, pitch, tempo, onPitchChange, onTempoChange, accent }: PitchTempoControlsProps) {
+function PitchTempoControls({ label, pitch, tempo, onPitchChange, onTempoChange, accent }: PitchTempoControlsProps) {
     const accentText = accent === 'pink' ? 'text-neon-pink' : 'text-neon-blue';
     const accentAccent = accent === 'pink' ? 'accent-[#FF3B81]' : 'accent-[#00B7ED]';
 
     return (
-        <div className={`space-y-3 ${enabled ? '' : 'opacity-40'}`}>
+        <div className="space-y-3">
             <div className={`text-[10px] font-bold uppercase tracking-widest ${accentText}`}>
-                {label} {!enabled && <span className="text-white/30">(YOUTUBE NO)</span>}
+                {label}
             </div>
             <div className="space-y-1">
                 <div className="flex justify-between text-[10px] font-bold text-white/50 uppercase tracking-widest">
                     <span>Tono</span><span>{pitch > 0 ? '+' : ''}{pitch}</span>
                 </div>
                 <input
-                    type="range" min="-12" max="12" step="1" value={pitch} disabled={!enabled}
+                    type="range" min="-12" max="12" step="1" value={pitch}
                     onChange={(e) => onPitchChange(parseInt(e.target.value))}
-                    className={`w-full ${accentAccent} ${enabled ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                    className={`w-full ${accentAccent} cursor-pointer`}
                 />
             </div>
             <div className="space-y-1">
@@ -1184,9 +1242,9 @@ function PitchTempoControls({ label, enabled, pitch, tempo, onPitchChange, onTem
                     <span>Tempo</span><span>{tempo}%</span>
                 </div>
                 <input
-                    type="range" min="50" max="150" step="1" value={tempo} disabled={!enabled}
+                    type="range" min="50" max="150" step="1" value={tempo}
                     onChange={(e) => onTempoChange(parseInt(e.target.value))}
-                    className={`w-full ${accentAccent} ${enabled ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                    className={`w-full ${accentAccent} cursor-pointer`}
                 />
             </div>
         </div>
