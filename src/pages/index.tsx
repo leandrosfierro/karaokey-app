@@ -869,7 +869,7 @@ export default function Home() {
               </button>
             </header>
 
-            <div className="grid lg:grid-cols-3 gap-8">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="space-y-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Users className="text-neon-pink w-5 h-5" />

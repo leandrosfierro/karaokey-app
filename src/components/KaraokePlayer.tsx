@@ -745,8 +745,8 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     ref={videoRowRef}
                     className={
                         cssFullscreen
-                            ? "fixed inset-0 z-9999 bg-black p-4 overflow-y-auto content-start grid gap-6" + (simple ? "" : " md:grid-cols-2")
-                            : (simple ? "grid gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid md:grid-cols-2 gap-6 bg-[#0a0a0a]")
+                            ? "fixed inset-0 z-9999 bg-black p-4 overflow-y-auto content-start grid grid-cols-1 gap-6" + (simple ? "" : " md:grid-cols-2")
+                            : (simple ? "grid grid-cols-1 gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid grid-cols-1 md:grid-cols-2 gap-6 bg-[#0a0a0a]")
                     }
                 >
                     {cssFullscreen && (
@@ -1089,7 +1089,7 @@ function DeckPanel(props: DeckPanelProps) {
                             <input
                                 type="range" min="0" max="100" step="1" value={props.volume}
                                 onChange={(e) => props.onVolumeChange!(parseInt(e.target.value))}
-                                className={`flex-1 h-1.5 ${accentRange} cursor-pointer`}
+                                className={`flex-1 w-full min-w-0 h-1.5 ${accentRange} cursor-pointer`}
                             />
                             <span className="shrink-0 text-[10px] font-bold text-white/50 w-8 text-right">{props.volume}%</span>
                         </div>
