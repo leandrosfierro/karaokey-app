@@ -2,15 +2,16 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick, Search } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick, Search, QrCode, X, Sparkles } from "lucide-react";
 import confetti from "canvas-confetti";
+import QRCode from "react-qr-code";
 import { SlotMachine } from "../components/SlotMachine";
 import { KaraokePlayer } from "../components/KaraokePlayer";
 import { TutorialOverlay } from "../components/TutorialOverlay";
 import { ModoPicker } from "../components/ModoPicker";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../lib/auth";
-import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow } from "../lib/supabase";
+import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow, HostRow, TemaPublicoRow } from "../lib/supabase";
 
 type Cancion = { titulo: string; artista?: string };
 
@@ -87,6 +88,14 @@ export default function Home() {
   const [modoSorteo, setModoSorteo] = useState<ModoSorteo>('completo');
   const [modoTurnos, setModoTurnos] = useState(false);
 
+  // Modo Participativo — QR público para que el público sume temas y aplauda en
+  // vivo. hostRow is null until this host ever toggles it on once (lazy row).
+  const [hostRow, setHostRow] = useState<HostRow | null>(null);
+  const [temasPublico, setTemasPublico] = useState<TemaPublicoRow[]>([]);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [currentPerformanceId, setCurrentPerformanceId] = useState<string | null>(null);
+  const participativoEnabled = hostRow?.participativo_enabled ?? false;
+
   // Load from Supabase — a brand-new account's tables are genuinely empty
   // (no demo participantes/canciones seeded into it; the empty-state copy
   // below, "No hay nadie... todavía", is the real first-run experience).
@@ -108,14 +117,28 @@ export default function Home() {
 
     let cancelled = false;
     (async () => {
-      const [{ data: pData, error: pErr }, { data: cData, error: cErr }, { data: colaData, error: colaErr }] = await Promise.all([
+      const [
+        { data: pData, error: pErr },
+        { data: cData, error: cErr },
+        { data: colaData, error: colaErr },
+        { data: hostData, error: hostErr },
+        { data: temasData, error: temasErr },
+      ] = await Promise.all([
         supabase.from('karaokey_participantes').select('*').order('created_at', { ascending: true }),
         supabase.from('karaokey_canciones').select('*').order('created_at', { ascending: true }),
         supabase.from('karaokey_cola_turnos').select('*').order('created_at', { ascending: true }),
+        supabase.from('karaokey_hosts').select('*').maybeSingle(),
+        supabase.from('karaokey_temas_publico').select('*').order('created_at', { ascending: true }),
       ]);
 
       if (colaErr) console.error('[KaraoKey] Failed to load cola de turnos:', colaErr);
       else setColaRows(colaData ?? []);
+
+      if (hostErr) console.error('[KaraoKey] Failed to load host settings:', hostErr);
+      else setHostRow(hostData ?? null);
+
+      if (temasErr) console.error('[KaraoKey] Failed to load temas del público:', temasErr);
+      else setTemasPublico(temasData ?? []);
 
       if (cancelled) return;
 
@@ -146,6 +169,123 @@ export default function Home() {
       localStorage.setItem("karaokey-modo-turnos", JSON.stringify(modoTurnos));
     }
   }, [modoDuo, modoSorteo, modoTurnos, mounted]);
+
+  // Live-updating "Temas del Público": while this host has the feature on, new
+  // guest submissions (written by rpc_submit_tema_publico, running as a
+  // different role) pop into the list without a manual refresh. The existing
+  // owner_all RLS policy already scopes delivery to this user's own rows.
+  useEffect(() => {
+    if (!user || !participativoEnabled) return;
+    const channel = supabase
+      .channel(`temas-publico-${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'karaokey_temas_publico', filter: `user_id=eq.${user.id}` },
+        (payload) => {
+          const row = payload.new as TemaPublicoRow;
+          setTemasPublico((prev) => (prev.some((t) => t.id === row.id) ? prev : [...prev, row]));
+        }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [user, participativoEnabled]);
+
+  // Turns Modo Participativo on/off; lazily creates this host's karaokey_hosts
+  // row (and its party_code) on the very first activation instead of for every
+  // account up front.
+  const toggleParticipativo = async () => {
+    if (!user) return;
+    const next = !participativoEnabled;
+    const { data, error } = await supabase
+      .from('karaokey_hosts')
+      .upsert({ user_id: user.id, participativo_enabled: next }, { onConflict: 'user_id' })
+      .select()
+      .single();
+    if (error || !data) {
+      toast('No se pudo guardar la configuración.', { type: 'error' });
+      return;
+    }
+    setHostRow(data);
+    toast(
+      next ? '¡Modo Participativo activado! Mostrá el código QR para que se sumen.' : 'Modo Participativo desactivado.',
+      { type: 'success' }
+    );
+  };
+
+  const regenerarCodigo = async () => {
+    if (!user) return;
+    const { data: newCode, error: genErr } = await supabase.rpc('generate_party_code');
+    if (genErr || !newCode) {
+      toast('No se pudo generar un código nuevo.', { type: 'error' });
+      return;
+    }
+    const { data, error } = await supabase
+      .from('karaokey_hosts')
+      .update({ party_code: newCode })
+      .eq('user_id', user.id)
+      .select()
+      .single();
+    if (error || !data) {
+      toast('No se pudo actualizar el código.', { type: 'error' });
+      return;
+    }
+    setHostRow(data);
+    toast('Código regenerado — el QR anterior ya no funciona.', { type: 'success' });
+  };
+
+  // Moves a público-submitted suggestion into the real Cancionero — the host
+  // decides when, it never happens automatically.
+  const promoverTema = async (tema: TemaPublicoRow) => {
+    const { data, error } = await supabase
+      .from('karaokey_canciones')
+      .insert({ titulo: tema.titulo, artista: tema.artista })
+      .select()
+      .single();
+    if (error || !data) {
+      toast('No se pudo agregar al cancionero.', { type: 'error' });
+      return;
+    }
+    setCancionRows((prev) => [...prev, data]);
+    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
+    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error: delError }) => {
+      if (delError) console.error('[KaraoKey] Failed to remove promoted tema:', delError);
+    });
+    toast(`"${tema.titulo}" agregado al Cancionero`, { type: 'success' });
+  };
+
+  const eliminarTema = (tema: TemaPublicoRow) => {
+    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
+    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error }) => {
+      if (error) toast('Error al eliminar en la base de datos.', { type: 'error' });
+    });
+  };
+
+  // Publishes "who's on stage now" so /vivo/[code] guests (and the applause
+  // counter) see it live — a no-op when the host never turned the feature on.
+  const publishPerformance = (p: string[], c: Cancion | null) => {
+    if (!user || !participativoEnabled) {
+      setCurrentPerformanceId(null);
+      return;
+    }
+    const id = crypto.randomUUID();
+    supabase
+      .from('karaokey_performances')
+      .upsert(
+        {
+          user_id: user.id,
+          id,
+          participantes: p,
+          cancion_titulo: c?.titulo ?? null,
+          cancion_artista: c?.artista ?? null,
+          started_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      )
+      .then(({ error }) => {
+        if (error) console.error('[KaraoKey] Failed to publish performance:', error);
+      });
+    setCurrentPerformanceId(id);
+  };
 
   const toggleModoDuo = () => {
     if (!modoDuo && participantes.length < 2) {
@@ -223,6 +363,7 @@ export default function Home() {
       id: Date.now().toString()
     });
     marcarYaCantaron(p);
+    publishPerformance(p, c);
     confetti.reset();
     setView('player');
     setShowWinnerModal(false);
@@ -232,6 +373,7 @@ export default function Home() {
   const revealCantante = (p: string[]) => {
     setSorteoCantante(p);
     marcarYaCantaron(p);
+    publishPerformance(p, null);
     confetti({
       particleCount: 150,
       spread: 70,
@@ -567,6 +709,17 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Only shown once Modo Participativo is on — opens the QR the public
+              scans to join this party's /vivo/[code] page. */}
+          {participativoEnabled && hostRow && (
+            <button
+              onClick={() => setShowQrModal(true)}
+              className="p-3 bg-white/5 border border-neon-blue/30 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
+              title="Compartir con el público (QR)"
+            >
+              <QrCode size={20} className="text-neon-blue" />
+            </button>
+          )}
           <button
             onClick={() => setShowTutorial(true)}
             className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
@@ -583,6 +736,44 @@ export default function Home() {
           </button>
         </div>
       </div>
+
+      {showQrModal && hostRow && (
+        <div
+          className="fixed inset-0 z-100 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setShowQrModal(false)}
+        >
+          <div
+            className="bg-[#121212] border border-white/10 rounded-3xl p-6 max-w-sm w-full space-y-5 text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold uppercase tracking-wider flex items-center gap-2">
+                <Sparkles size={18} className="text-neon-blue" /> Sumate a la fiesta
+              </h3>
+              <button onClick={() => setShowQrModal(false)} className="p-1.5 rounded-full hover:bg-white/10 cursor-pointer">
+                <X size={18} className="text-white/50" />
+              </button>
+            </div>
+            <p className="text-xs text-white/50">Escaneá para sumar canciones y aplaudir en vivo</p>
+            <div className="bg-white p-4 rounded-2xl mx-auto w-fit">
+              <QRCode
+                value={`${typeof window !== 'undefined' ? window.location.origin : ''}/vivo/${hostRow.party_code}`}
+                size={200}
+              />
+            </div>
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">O escribí el código</p>
+              <p className="text-2xl font-black tracking-[0.2em] text-neon-blue">{hostRow.party_code}</p>
+            </div>
+            <button
+              onClick={regenerarCodigo}
+              className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/60 hover:text-white transition-colors cursor-pointer"
+            >
+              <RefreshCw size={14} /> Regenerar código
+            </button>
+          </div>
+        </div>
+      )}
 
       {(showTutorial || !onboardingDone) && (
         <TutorialOverlay
@@ -797,6 +988,63 @@ export default function Home() {
                       Pro
                     </button>
                   </div>
+
+                  <div>
+                    <button
+                      onClick={toggleParticipativo}
+                      className="w-full flex items-center justify-between gap-3 p-4 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 transition-all cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-white/70">
+                        <QrCode size={16} /> Modo Participativo
+                      </span>
+                      <span className={`relative w-9 h-5 rounded-full transition-colors ${participativoEnabled ? 'bg-neon-blue' : 'bg-white/15'}`}>
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${participativoEnabled ? 'translate-x-4' : ''}`} />
+                      </span>
+                    </button>
+                    <p className="text-xs text-white/40 pt-2">
+                      {participativoEnabled
+                        ? 'El público puede escanear un QR para sumar temas y aplaudir a quien canta.'
+                        : 'Activalo para mostrar un QR y que el público sume temas y aplauda en vivo.'}
+                    </p>
+                  </div>
+
+                  {participativoEnabled && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2">
+                        <Sparkles size={14} /> Temas del Público {temasPublico.length > 0 && `(${temasPublico.length})`}
+                      </p>
+                      {temasPublico.length === 0 ? (
+                        <p className="text-xs text-white/40 italic px-1">Todavía no sumaron ningún tema.</p>
+                      ) : (
+                        <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1 custom-scrollbar">
+                          {temasPublico.map((tema) => (
+                            <div key={tema.id} className="flex items-center gap-2 p-2.5 rounded-xl bg-white/5 border border-white/5">
+                              <div className="min-w-0 flex-1">
+                                <p className="text-xs font-bold text-white truncate">{tema.titulo}</p>
+                                <p className="text-[10px] text-white/40 truncate">
+                                  {tema.artista ? `${tema.artista} · ` : ''}sumado por {tema.submitted_by}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => promoverTema(tema)}
+                                title="Agregar al Cancionero"
+                                className="shrink-0 p-2 rounded-full bg-neon-blue/10 hover:bg-neon-blue/20 text-neon-blue cursor-pointer transition-colors"
+                              >
+                                <ListPlus size={14} />
+                              </button>
+                              <button
+                                onClick={() => eliminarTema(tema)}
+                                title="Eliminar"
+                                className="shrink-0 p-2 rounded-full bg-white/5 hover:bg-red-500/10 text-white/40 hover:text-red-400 cursor-pointer transition-colors"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <button
                     onClick={() => signOut()}
@@ -1172,6 +1420,7 @@ export default function Home() {
               setTimeout(() => modoTurnos ? siguienteTurno() : pedirSorteo(), 500);
             }}
             simple={modo === 'simple'}
+            currentPerformanceId={currentPerformanceId ?? undefined}
           />
         ) : (
           // Modo DJ — standalone Karaokey Pro player, no sorteo dependency: both

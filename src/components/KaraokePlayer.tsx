@@ -61,6 +61,12 @@ interface KaraokePlayerProps {
     // Vol/Igualar/Auto Crossfade row, no Pantalla Externa. Deck A works exactly
     // as it always has (Cue/Set/Play/Stop, Tono/Tempo, all three source tabs).
     simple?: boolean;
+    // Modo Participativo: the current karaokey_performances.id, published by
+    // index.tsx only when the host has the feature on. When present, shows a
+    // live "👏 N" counter fed by realtime karaokey_aplausos inserts from
+    // /vivo/[code] guests. Omitted entirely (no overlay) when the host never
+    // turned the feature on, or in Modo DJ (no performance to attach it to).
+    currentPerformanceId?: string;
 }
 
 interface VideoResult {
@@ -135,7 +141,7 @@ declare global {
 type DeckKind = 'youtube' | 'local';
 type DeckLetter = 'A' | 'B';
 
-export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero, simple = false }) => {
+export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero, simple = false, currentPerformanceId }) => {
     const toast = useToast();
     const { user } = useAuth();
     const [isFullscreen, setIsFullscreen] = useState(false);
@@ -147,6 +153,41 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const [loading, setLoading] = useState(true);
     const videoRowRef = useRef<HTMLDivElement>(null);
     const hasFetched = useRef(false);
+
+    // Modo Participativo — live applause count for the current performance.
+    // Seeded once via a count query, then incremented as karaokey_aplausos
+    // INSERT events arrive over Realtime from /vivo/[code] guests. The reset to
+    // 0 right when currentPerformanceId changes (new song / no song) is a real
+    // synchronization with that prop, not state derivable at render time.
+    /* eslint-disable react-hooks/set-state-in-effect -- resetting the tally the
+       instant the performance identity changes (including to none) is the point
+       of this effect, not incidental render-time state */
+    const [aplausos, setAplausos] = useState(0);
+    useEffect(() => {
+        if (!currentPerformanceId) {
+            setAplausos(0);
+            return;
+        }
+        let cancelled = false;
+        setAplausos(0);
+        supabase
+            .from('karaokey_aplausos')
+            .select('id', { count: 'exact', head: true })
+            .eq('performance_id', currentPerformanceId)
+            .then(({ count }) => {
+                if (!cancelled) setAplausos(count ?? 0);
+            });
+        const channel = supabase
+            .channel(`aplausos-${currentPerformanceId}`)
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'karaokey_aplausos', filter: `performance_id=eq.${currentPerformanceId}` },
+                () => setAplausos((prev) => prev + 1)
+            )
+            .subscribe();
+        return () => { cancelled = true; supabase.removeChannel(channel); };
+    }, [currentPerformanceId]);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     // ---- Deck A ----
     const deckAPlayer = useRef<DeckAdapter | null>(null);
@@ -718,6 +759,18 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                         className="inline-flex items-center gap-2 px-6 py-2 bg-yellow-400/20 border border-yellow-400/40 rounded-full text-yellow-300 text-sm font-bold uppercase tracking-wider backdrop-blur-xs"
                     >
                         <Trophy size={16} /> {challenge}
+                    </motion.div>
+                )}
+
+                {/* Modo Participativo — live applause tally from /vivo/[code] guests.
+                    Only rendered when the host published a performance id. */}
+                {currentPerformanceId && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className="inline-flex items-center gap-2 px-6 py-2 bg-neon-blue/15 border border-neon-blue/30 rounded-full text-white text-sm font-bold tracking-wider backdrop-blur-xs"
+                    >
+                        <span aria-hidden>👏</span> {aplausos}
                     </motion.div>
                 )}
             </div>

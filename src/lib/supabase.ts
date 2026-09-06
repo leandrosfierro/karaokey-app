@@ -53,3 +53,40 @@ export interface ColaTurnoRow {
     created_at: string;
     user_id: string | null;
 }
+
+// Modo Participativo — QR público para sumar temas y aplaudir en vivo. These four
+// are the only karaokey_* tables anon ever touches, and only through the
+// rpc_resolve_party / rpc_submit_tema_publico / rpc_registrar_aplauso functions —
+// never a direct table read/write. See the migration `add_modo_participativo_tables`.
+export interface HostRow {
+    user_id: string;
+    party_code: string;
+    participativo_enabled: boolean;
+    created_at: string;
+}
+
+export interface TemaPublicoRow {
+    id: string;
+    user_id: string;
+    titulo: string;
+    artista: string | null;
+    submitted_by: string;
+    device_id: string;
+    created_at: string;
+}
+
+export interface PerformanceRow {
+    user_id: string;
+    id: string;
+    participantes: string[];
+    cancion_titulo: string | null;
+    cancion_artista: string | null;
+    started_at: string;
+}
+
+export interface AplausoRow {
+    id: string;
+    performance_id: string;
+    device_id: string;
+    created_at: string;
+}
