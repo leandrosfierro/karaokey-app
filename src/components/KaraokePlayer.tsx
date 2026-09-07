@@ -7,6 +7,7 @@ import { useToast } from './Toast';
 import { useAuth } from '../lib/auth';
 import { supabase, LocalAudioRow } from '../lib/supabase';
 import { DeckAdapter, LocalAudioDeckAdapter } from '../lib/deckAdapter';
+import { VideoResult, mapYoutubeItemToVideoResult, cancionCacheKey } from '../lib/youtube';
 
 const LOCAL_AUDIO_BUCKET = 'karaokey-audio';
 const MAX_LOCAL_FILE_BYTES = 25 * 1024 * 1024;
@@ -69,23 +70,8 @@ interface KaraokePlayerProps {
     currentPerformanceId?: string;
 }
 
-interface VideoResult {
-    id: string;
-    title: string;
-    thumbnail: string;
-    channel?: string;
-}
-
-// Stable per-song lookup key for the video cache — same song should hit the
-// same cache row regardless of accents/casing/whitespace differences.
-function cancionCacheKey(titulo: string, artista?: string): string {
-    return `${titulo}|${artista || ''}`
-        .toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9|]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
+// VideoResult and cancionCacheKey now live in ../lib/youtube (shared with
+// index.tsx's imports and the /vivo/[code] guest search).
 
 // Cache-checked karaoke search, shared by the sorteo auto-load (Deck A on mount)
 // and the standalone "Mi Cancionero" loader (either deck, on demand).
@@ -112,12 +98,7 @@ async function searchKaraokeVideo(cancion: { titulo: string; artista?: string })
 
     let karaokeResults: VideoResult[] = [];
     if (kData.items && kData.items.length > 0) {
-        karaokeResults = kData.items.map((item: any) => ({
-            id: item.id.videoId,
-            title: item.snippet.title,
-            thumbnail: item.snippet.thumbnails.medium.url,
-            channel: item.snippet.channelTitle,
-        }));
+        karaokeResults = kData.items.map(mapYoutubeItemToVideoResult);
     }
 
     supabase.from('karaokey_video_cache').upsert({
@@ -155,37 +136,43 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const hasFetched = useRef(false);
 
     // Modo Participativo — live applause count for the current performance.
-    // Seeded once via a count query, then incremented as karaokey_aplausos
-    // INSERT events arrive over Realtime from /vivo/[code] guests. The reset to
-    // 0 right when currentPerformanceId changes (new song / no song) is a real
-    // synchronization with that prop, not state derivable at render time.
+    // Refetches the true count on every realtime INSERT rather than
+    // incrementing by 1: a guest's vote can land the instant a brand-new
+    // performance starts, while this channel (re-created per
+    // currentPerformanceId) is still mid-handshake — an increment would just
+    // miss that event, but a refetch self-corrects regardless of timing.
+    // The reset to 0 right when currentPerformanceId changes (new song / no
+    // song) is a real synchronization with that prop, not render-time state.
     /* eslint-disable react-hooks/set-state-in-effect -- resetting the tally the
        instant the performance identity changes (including to none) is the point
        of this effect, not incidental render-time state */
     const [aplausos, setAplausos] = useState(0);
+    const currentPerfIdRef = useRef<string | null>(null);
     useEffect(() => {
+        currentPerfIdRef.current = currentPerformanceId ?? null;
         if (!currentPerformanceId) {
             setAplausos(0);
             return;
         }
-        let cancelled = false;
-        setAplausos(0);
-        supabase
-            .from('karaokey_aplausos')
-            .select('id', { count: 'exact', head: true })
-            .eq('performance_id', currentPerformanceId)
-            .then(({ count }) => {
-                if (!cancelled) setAplausos(count ?? 0);
-            });
+        const refresh = () => {
+            supabase
+                .from('karaokey_aplausos')
+                .select('id', { count: 'exact', head: true })
+                .eq('performance_id', currentPerformanceId)
+                .then(({ count }) => {
+                    if (currentPerfIdRef.current === currentPerformanceId) setAplausos(count ?? 0);
+                });
+        };
+        refresh();
         const channel = supabase
             .channel(`aplausos-${currentPerformanceId}`)
             .on(
                 'postgres_changes',
                 { event: 'INSERT', schema: 'public', table: 'karaokey_aplausos', filter: `performance_id=eq.${currentPerformanceId}` },
-                () => setAplausos((prev) => prev + 1)
+                refresh
             )
             .subscribe();
-        return () => { cancelled = true; supabase.removeChannel(channel); };
+        return () => { supabase.removeChannel(channel); };
     }, [currentPerformanceId]);
     /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -1381,12 +1368,7 @@ function SearchBox({ placeholder, onResults, onSelect }: SearchBoxProps) {
             const data = await res.json();
             if (!res.ok) throw new Error(data.reason === 'quota_exceeded' ? 'quota_exceeded' : 'search_failed');
 
-            const results: VideoResult[] = (data.items || []).map((item: any) => ({
-                id: item.id.videoId,
-                title: item.snippet.title,
-                thumbnail: item.snippet.thumbnails.medium.url,
-                channel: item.snippet.channelTitle,
-            }));
+            const results: VideoResult[] = (data.items || []).map(mapYoutubeItemToVideoResult);
             onResults(results);
             if (results.length > 0) onSelect(results[0].id);
         } catch (err) {

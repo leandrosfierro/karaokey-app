@@ -1,11 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
+import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
-import { Music2, Mic2, ListPlus, HandMetal, Loader2, PartyPopper } from "lucide-react";
+import { Music2, Mic2, ListPlus, HandMetal, Loader2, PartyPopper, Search, X } from "lucide-react";
 import { supabase, isSupabaseConfigured, PerformanceRow } from "../../lib/supabase";
 import { getDeviceId } from "../../lib/deviceId";
 import { useToast } from "../../components/Toast";
+import { VideoResult, mapYoutubeItemToVideoResult, parseKaraokeVideoTitle } from "../../lib/youtube";
+
+// A YouTube search result the guest can pick, already carrying the parsed
+// título/artista used to store it — same shape KaraokePlayer's own search uses.
+type GuestVideoOption = VideoResult & { titulo: string; artista?: string };
 
 // Modo Participativo's public entry point — no login, no useAuth. Reached by
 // scanning the host's QR (or typing the code by hand). Every write here goes
@@ -127,8 +133,10 @@ export default function VivoPage() {
 }
 
 function SumarCancion({ code, deviceId, toast }: { code: string; deviceId: string; toast: ReturnType<typeof useToast> }) {
-  const [titulo, setTitulo] = useState("");
-  const [artista, setArtista] = useState("");
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<GuestVideoOption[]>([]);
+  const [selected, setSelected] = useState<GuestVideoOption | null>(null);
   const [nombre, setNombre] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [cooldownUntil, setCooldownUntil] = useState(0);
@@ -147,16 +155,44 @@ function SumarCancion({ code, deviceId, toast }: { code: string; deviceId: strin
   const secondsLeft = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
   const onCooldown = secondsLeft > 0;
 
+  // Same /api/youtube endpoint the host's own search uses — biased toward
+  // karaoke uploads, since that's what actually gets sung. The guest picks a
+  // specific video instead of typing free text, so the exact version they
+  // chose is what travels with the submission (and what plays later).
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!query.trim() || searching) return;
+    setSearching(true);
+    setSelected(null);
+    try {
+      const res = await fetch(`/api/youtube?q=${encodeURIComponent(`${query} karaoke`)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.reason === "quota_exceeded" ? "quota_exceeded" : "search_failed");
+      const items: GuestVideoOption[] = (data.items || []).map((item: any) => ({
+        ...mapYoutubeItemToVideoResult(item),
+        ...parseKaraokeVideoTitle(item),
+      }));
+      setResults(items);
+      if (items.length === 0) toast("No encontramos resultados, probá con otra búsqueda.", { type: "error" });
+    } catch {
+      toast("No se pudo buscar en YouTube. Probá de nuevo.", { type: "error" });
+    } finally {
+      setSearching(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!titulo.trim() || onCooldown || submitting) return;
+    if (!selected || onCooldown || submitting) return;
     setSubmitting(true);
     const { error } = await supabase.rpc("rpc_submit_tema_publico", {
       p_code: code,
-      p_titulo: titulo,
-      p_artista: artista || null,
+      p_titulo: selected.titulo,
+      p_artista: selected.artista || null,
       p_submitted_by: nombre || null,
       p_device_id: deviceId,
+      p_youtube_video_id: selected.id,
+      p_youtube_thumbnail: selected.thumbnail || null,
     });
     setSubmitting(false);
     if (error) {
@@ -167,59 +203,100 @@ function SumarCancion({ code, deviceId, toast }: { code: string; deviceId: strin
       }
       return;
     }
-    toast(`¡"${titulo}" quedó anotada!`, { type: "success" });
-    setTitulo("");
-    setArtista("");
+    toast(`¡Listo! "${selected.titulo}" quedó en la cola.`, { type: "success" });
+    setSelected(null);
+    setQuery("");
+    setResults([]);
     setCooldownUntil(Date.now() + SUBMIT_COOLDOWN_MS);
     setNow(Date.now());
   };
 
   return (
-    <motion.form
-      onSubmit={handleSubmit}
+    <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       className="glass-card rounded-3xl p-5 space-y-4 border border-white/5"
     >
-      <p className="text-sm text-white/60">Sumá una canción a la lista de espera del anfitrión.</p>
-      <div className="space-y-1">
-        <label className="text-[10px] font-bold uppercase tracking-widest text-white/40">Título *</label>
-        <input
-          value={titulo}
-          onChange={(e) => setTitulo(e.target.value)}
-          placeholder="Ej: De música ligera"
-          maxLength={120}
-          className="w-full p-3 bg-black/30 border border-white/10 rounded-xl text-sm outline-none focus:border-neon-pink/40"
-        />
-      </div>
-      <div className="space-y-1">
-        <label className="text-[10px] font-bold uppercase tracking-widest text-white/40">Artista</label>
-        <input
-          value={artista}
-          onChange={(e) => setArtista(e.target.value)}
-          placeholder="Ej: Soda Stereo"
-          maxLength={120}
-          className="w-full p-3 bg-black/30 border border-white/10 rounded-xl text-sm outline-none focus:border-neon-pink/40"
-        />
-      </div>
-      <div className="space-y-1">
-        <label className="text-[10px] font-bold uppercase tracking-widest text-white/40">Tu nombre</label>
-        <input
-          value={nombre}
-          onChange={(e) => setNombre(e.target.value)}
-          placeholder="Para que sepan quién la sumó"
-          maxLength={60}
-          className="w-full p-3 bg-black/30 border border-white/10 rounded-xl text-sm outline-none focus:border-neon-pink/40"
-        />
-      </div>
-      <button
-        type="submit"
-        disabled={!titulo.trim() || submitting || onCooldown}
-        className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold uppercase text-xs tracking-widest disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-opacity"
-      >
-        <Music2 size={16} /> {onCooldown ? `Esperá ${secondsLeft}s...` : "Sumar canción"}
-      </button>
-    </motion.form>
+      <p className="text-sm text-white/60">Buscá tu canción en YouTube y anotate para cantarla.</p>
+
+      {!selected ? (
+        <>
+          <form onSubmit={handleSearch} className="flex gap-2">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar canción..."
+              className="flex-1 min-w-0 p-3 bg-black/30 border border-white/10 rounded-xl text-sm outline-none focus:border-neon-pink/40"
+            />
+            <button
+              type="submit"
+              disabled={!query.trim() || searching}
+              className="shrink-0 flex items-center gap-1.5 px-4 py-3 bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-xl text-xs font-bold uppercase tracking-widest cursor-pointer transition-colors"
+            >
+              {searching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />} Buscar
+            </button>
+          </form>
+
+          {results.length > 0 && (
+            <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
+              {results.map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => setSelected(r)}
+                  className="w-full flex items-center gap-3 p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-left cursor-pointer transition-colors"
+                >
+                  <div className="relative w-16 h-10 shrink-0 rounded-lg overflow-hidden bg-black">
+                    <Image src={r.thumbnail} alt="" fill sizes="64px" className="object-cover" unoptimized />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-bold text-white truncate">{r.titulo}</p>
+                    <p className="text-[10px] text-white/40 truncate">{r.artista}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="flex items-center gap-3 p-2.5 rounded-xl bg-neon-pink/10 border border-neon-pink/20">
+            <div className="relative w-16 h-10 shrink-0 rounded-lg overflow-hidden bg-black">
+              <Image src={selected.thumbnail} alt="" fill sizes="64px" className="object-cover" unoptimized />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-bold text-white truncate">{selected.titulo}</p>
+              <p className="text-[10px] text-white/40 truncate">{selected.artista}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="shrink-0 p-2 rounded-full hover:bg-white/10 cursor-pointer"
+              title="Elegir otra"
+            >
+              <X size={14} className="text-white/50" />
+            </button>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold uppercase tracking-widest text-white/40">¿Quién va a cantar?</label>
+            <input
+              value={nombre}
+              onChange={(e) => setNombre(e.target.value)}
+              placeholder="Tu nombre"
+              maxLength={60}
+              className="w-full p-3 bg-black/30 border border-white/10 rounded-xl text-sm outline-none focus:border-neon-pink/40"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={submitting || onCooldown}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] font-bold uppercase text-xs tracking-widest disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-opacity"
+          >
+            <Music2 size={16} /> {onCooldown ? `Esperá ${secondsLeft}s...` : "Anotarme para cantar"}
+          </button>
+        </form>
+      )}
+    </motion.div>
   );
 }
 
@@ -256,13 +333,18 @@ function Votar({
   }, [deviceId]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Live "who's on stage" — initial fetch + realtime subscription.
+  // Live "who's on stage" — karaokey_performances is append-only (a fresh row
+  // per performance, never mutated in place — see the rpc/schema comments),
+  // so "current" is just the most recent row for this host, and a live
+  // update is simply a new INSERT arriving, never an UPDATE/DELETE to chase.
   useEffect(() => {
     let cancelled = false;
     supabase
       .from("karaokey_performances")
       .select("*")
       .eq("user_id", hostUserId)
+      .order("started_at", { ascending: false })
+      .limit(1)
       .maybeSingle()
       .then(({ data }) => {
         if (!cancelled) setPerformance(data ?? null);
@@ -271,8 +353,11 @@ function Votar({
       .channel(`performance-${hostUserId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "karaokey_performances", filter: `user_id=eq.${hostUserId}` },
-        (payload) => setPerformance((payload.new as PerformanceRow) ?? null)
+        { event: "INSERT", schema: "public", table: "karaokey_performances", filter: `user_id=eq.${hostUserId}` },
+        (payload) => {
+          const row = payload.new as Partial<PerformanceRow> | undefined;
+          if (row && Array.isArray(row.participantes)) setPerformance(row as PerformanceRow);
+        }
       )
       .subscribe();
     return () => { cancelled = true; supabase.removeChannel(channel); };
@@ -280,30 +365,41 @@ function Votar({
 
   // Live applause count for whichever performance is current — reseeded whenever
   // performance.id changes (a new song starting resets the tally, as intended).
+  // Refetches the true count rather than incrementing by 1 on each realtime
+  // event: right after this device's own vote we also call this directly
+  // (handleAplaudir below), since a brand-new performance's realtime channel
+  // can still be mid-handshake at that exact moment — an increment would
+  // simply miss that event, but a refetch is self-correcting either way, and
+  // idempotent if the same insert also arrives later over the channel.
+  const currentPerfIdRef = useRef<string | null>(null);
+  const refreshAplausos = (performanceId: string) => {
+    supabase
+      .from("karaokey_aplausos")
+      .select("id", { count: "exact", head: true })
+      .eq("performance_id", performanceId)
+      .then(({ count }) => {
+        if (currentPerfIdRef.current === performanceId) setAplausos(count ?? 0);
+      });
+  };
+
   /* eslint-disable react-hooks/set-state-in-effect -- resetting the tally the
      instant the performance identity changes is the point of this effect */
   useEffect(() => {
+    currentPerfIdRef.current = performance?.id ?? null;
     if (!performance?.id) {
       setAplausos(0);
       return;
     }
-    let cancelled = false;
-    supabase
-      .from("karaokey_aplausos")
-      .select("id", { count: "exact", head: true })
-      .eq("performance_id", performance.id)
-      .then(({ count }) => {
-        if (!cancelled) setAplausos(count ?? 0);
-      });
+    refreshAplausos(performance.id);
     const channel = supabase
       .channel(`aplausos-${performance.id}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "karaokey_aplausos", filter: `performance_id=eq.${performance.id}` },
-        () => setAplausos((prev) => prev + 1)
+        () => refreshAplausos(performance.id)
       )
       .subscribe();
-    return () => { cancelled = true; supabase.removeChannel(channel); };
+    return () => { supabase.removeChannel(channel); };
   }, [performance?.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -322,6 +418,7 @@ function Votar({
       toast("No se pudo registrar tu aplauso.", { type: "error" });
       return;
     }
+    refreshAplausos(performance.id);
     const next = new Set(votedIds).add(performance.id);
     setVotedIds(next);
     try {
@@ -347,7 +444,7 @@ function Votar({
           <motion.div key={performance.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
             <div className="space-y-1">
               <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">Está cantando</p>
-              <p className="text-xl font-black">{performance.participantes.join(" & ")}</p>
+              <p className="text-xl font-black">{(performance.participantes ?? []).join(" & ")}</p>
               {performance.cancion_titulo && (
                 <p className="text-sm text-white/60">
                   {performance.cancion_titulo}

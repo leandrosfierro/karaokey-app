@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
+import Image from "next/image";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick, Search, QrCode, X, Sparkles } from "lucide-react";
+import { Plus, Trash2, Music, Users, Play, Trophy, Mic2, AtSign, CheckCircle2, RotateCcw, Users2, ListMusic, ListPlus, Settings2, ArrowLeft, RefreshCw, SkipForward, ListOrdered, Eraser, Disc3, HelpCircle, LogOut, MousePointerClick, Search, QrCode } from "lucide-react";
 import confetti from "canvas-confetti";
 import QRCode from "react-qr-code";
 import { SlotMachine } from "../components/SlotMachine";
@@ -12,6 +13,7 @@ import { ModoPicker } from "../components/ModoPicker";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../lib/auth";
 import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow, HostRow, TemaPublicoRow } from "../lib/supabase";
+import { parseKaraokeVideoTitle, cancionCacheKey } from "../lib/youtube";
 
 type Cancion = { titulo: string; artista?: string };
 
@@ -21,23 +23,8 @@ function parseCancionLine(line: string): Cancion {
   return { titulo: t.trim(), artista: a?.trim() };
 }
 
-// "Artist - Song (Karaoke)" -> { titulo: "Song", artista: "Artist" }. Naive heuristic,
-// shared by the channel and playlist imports since both return the same YouTube snippet shape.
-function parseKaraokeVideoTitle(item: any): Cancion {
-  let fullTitle: string = item.snippet.title;
-  fullTitle = fullTitle
-    .replace(/\(Karaoke Version\)/i, "")
-    .replace(/Karaoke/i, "")
-    .replace(/Lyrics/i, "")
-    .replace(/Letra/i, "")
-    .trim();
-
-  const parts = fullTitle.split("-");
-  if (parts.length >= 2) {
-    return { titulo: parts[1].trim(), artista: parts[0].trim() };
-  }
-  return { titulo: fullTitle, artista: item.snippet.channelTitle };
-}
+// parseKaraokeVideoTitle now lives in ../lib/youtube (shared with KaraokePlayer's
+// own search/cache and the /vivo/[code] guest search).
 
 interface SorteoResult {
   participantes: string[];
@@ -92,7 +79,6 @@ export default function Home() {
   // vivo. hostRow is null until this host ever toggles it on once (lazy row).
   const [hostRow, setHostRow] = useState<HostRow | null>(null);
   const [temasPublico, setTemasPublico] = useState<TemaPublicoRow[]>([]);
-  const [showQrModal, setShowQrModal] = useState(false);
   const [currentPerformanceId, setCurrentPerformanceId] = useState<string | null>(null);
   const participativoEnabled = hostRow?.participativo_enabled ?? false;
 
@@ -233,9 +219,43 @@ export default function Home() {
     toast('Código regenerado — el QR anterior ya no funciona.', { type: 'success' });
   };
 
-  // Moves a público-submitted suggestion into the real Cancionero — the host
-  // decides when, it never happens automatically.
+  // A guest's chosen video (or a manually-added entry that has none) becomes
+  // the karaokey_video_cache entry for that song — so whenever it's actually
+  // played (now or later, from any source), it's the exact version someone
+  // picked, not a fresh search that might land on something else.
+  const seedVideoCacheFromTema = (tema: TemaPublicoRow) => {
+    if (!tema.youtube_video_id) return;
+    supabase.from('karaokey_video_cache').upsert({
+      cancion_key: cancionCacheKey(tema.titulo, tema.artista ?? undefined),
+      karaoke_video_id: tema.youtube_video_id,
+      karaoke_alternatives: [{
+        id: tema.youtube_video_id,
+        title: tema.titulo,
+        thumbnail: tema.youtube_thumbnail ?? '',
+        channel: tema.artista ?? undefined,
+      }],
+    }, { onConflict: 'cancion_key' }).then(({ error }) => {
+      if (error) console.error('[KaraoKey] Failed to seed video cache from tema público:', error);
+    });
+  };
+
+  // Sends this queue entry straight to the escenario — the singer's own name
+  // as the performer, their chosen version pre-seeded so Deck A's auto-search
+  // hits the cache instead of possibly finding a different upload.
+  const cantarAhora = (tema: TemaPublicoRow) => {
+    seedVideoCacheFromTema(tema);
+    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
+    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error }) => {
+      if (error) console.error('[KaraoKey] Failed to remove tema after starting stage:', error);
+    });
+    startStage([tema.submitted_by], { titulo: tema.titulo, artista: tema.artista ?? undefined });
+  };
+
+  // Keeps the song in the general Cancionero (for future sorteos) without
+  // starting the escenario now, and without removing this person from the
+  // queue — they might still be sung via "Cantar ahora" later.
   const promoverTema = async (tema: TemaPublicoRow) => {
+    seedVideoCacheFromTema(tema);
     const { data, error } = await supabase
       .from('karaokey_canciones')
       .insert({ titulo: tema.titulo, artista: tema.artista })
@@ -246,10 +266,6 @@ export default function Home() {
       return;
     }
     setCancionRows((prev) => [...prev, data]);
-    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
-    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error: delError }) => {
-      if (delError) console.error('[KaraoKey] Failed to remove promoted tema:', delError);
-    });
     toast(`"${tema.titulo}" agregado al Cancionero`, { type: 'success' });
   };
 
@@ -260,6 +276,31 @@ export default function Home() {
     });
   };
 
+  // Lets the host add a {cantante, canción} entry straight to the same visible
+  // queue that guest QR submissions feed — picks from the existing Cancionero
+  // rather than a fresh YouTube search, since the host already trusts those.
+  const agregarTemaManual = async (nombre: string, cancion: Cancion) => {
+    if (!user) return;
+    const trimmed = nombre.trim();
+    if (!trimmed || !cancion.titulo.trim()) return;
+    const { data, error } = await supabase
+      .from('karaokey_temas_publico')
+      .insert({
+        user_id: user.id,
+        titulo: cancion.titulo,
+        artista: cancion.artista ?? null,
+        submitted_by: trimmed,
+        device_id: 'anfitrion',
+      })
+      .select()
+      .single();
+    if (error || !data) {
+      toast('No se pudo agregar a la cola.', { type: 'error' });
+      return;
+    }
+    setTemasPublico((prev) => (prev.some((t) => t.id === data.id) ? prev : [...prev, data]));
+  };
+
   // Publishes "who's on stage now" so /vivo/[code] guests (and the applause
   // counter) see it live — a no-op when the host never turned the feature on.
   const publishPerformance = (p: string[], c: Cancion | null) => {
@@ -267,20 +308,21 @@ export default function Home() {
       setCurrentPerformanceId(null);
       return;
     }
+    // A fresh row per performance (append-only), not an upsert onto a single
+    // mutable slot — once a performance has any karaokey_aplausos against it,
+    // changing its id in place would violate that table's foreign key. /vivo's
+    // Votar tab resolves "the current one" by started_at, not by a fixed id.
     const id = crypto.randomUUID();
     supabase
       .from('karaokey_performances')
-      .upsert(
-        {
-          user_id: user.id,
-          id,
-          participantes: p,
-          cancion_titulo: c?.titulo ?? null,
-          cancion_artista: c?.artista ?? null,
-          started_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id' }
-      )
+      .insert({
+        user_id: user.id,
+        id,
+        participantes: p,
+        cancion_titulo: c?.titulo ?? null,
+        cancion_artista: c?.artista ?? null,
+        started_at: new Date().toISOString(),
+      })
       .then(({ error }) => {
         if (error) console.error('[KaraoKey] Failed to publish performance:', error);
       });
@@ -709,17 +751,6 @@ export default function Home() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Only shown once Modo Participativo is on — opens the QR the public
-              scans to join this party's /vivo/[code] page. */}
-          {participativoEnabled && hostRow && (
-            <button
-              onClick={() => setShowQrModal(true)}
-              className="p-3 bg-white/5 border border-neon-blue/30 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
-              title="Compartir con el público (QR)"
-            >
-              <QrCode size={20} className="text-neon-blue" />
-            </button>
-          )}
           <button
             onClick={() => setShowTutorial(true)}
             className="p-3 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-colors backdrop-blur-md"
@@ -736,44 +767,6 @@ export default function Home() {
           </button>
         </div>
       </div>
-
-      {showQrModal && hostRow && (
-        <div
-          className="fixed inset-0 z-100 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => setShowQrModal(false)}
-        >
-          <div
-            className="bg-[#121212] border border-white/10 rounded-3xl p-6 max-w-sm w-full space-y-5 text-center"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold uppercase tracking-wider flex items-center gap-2">
-                <Sparkles size={18} className="text-neon-blue" /> Sumate a la fiesta
-              </h3>
-              <button onClick={() => setShowQrModal(false)} className="p-1.5 rounded-full hover:bg-white/10 cursor-pointer">
-                <X size={18} className="text-white/50" />
-              </button>
-            </div>
-            <p className="text-xs text-white/50">Escaneá para sumar canciones y aplaudir en vivo</p>
-            <div className="bg-white p-4 rounded-2xl mx-auto w-fit">
-              <QRCode
-                value={`${typeof window !== 'undefined' ? window.location.origin : ''}/vivo/${hostRow.party_code}`}
-                size={200}
-              />
-            </div>
-            <div className="space-y-1">
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">O escribí el código</p>
-              <p className="text-2xl font-black tracking-[0.2em] text-neon-blue">{hostRow.party_code}</p>
-            </div>
-            <button
-              onClick={regenerarCodigo}
-              className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl text-xs font-bold uppercase tracking-wider text-white/60 hover:text-white transition-colors cursor-pointer"
-            >
-              <RefreshCw size={14} /> Regenerar código
-            </button>
-          </div>
-        </div>
-      )}
 
       {(showTutorial || !onboardingDone) && (
         <TutorialOverlay
@@ -1008,44 +1001,6 @@ export default function Home() {
                     </p>
                   </div>
 
-                  {participativoEnabled && (
-                    <div className="space-y-2">
-                      <p className="text-xs font-bold uppercase tracking-widest text-white/50 flex items-center gap-2">
-                        <Sparkles size={14} /> Temas del Público {temasPublico.length > 0 && `(${temasPublico.length})`}
-                      </p>
-                      {temasPublico.length === 0 ? (
-                        <p className="text-xs text-white/40 italic px-1">Todavía no sumaron ningún tema.</p>
-                      ) : (
-                        <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1 custom-scrollbar">
-                          {temasPublico.map((tema) => (
-                            <div key={tema.id} className="flex items-center gap-2 p-2.5 rounded-xl bg-white/5 border border-white/5">
-                              <div className="min-w-0 flex-1">
-                                <p className="text-xs font-bold text-white truncate">{tema.titulo}</p>
-                                <p className="text-[10px] text-white/40 truncate">
-                                  {tema.artista ? `${tema.artista} · ` : ''}sumado por {tema.submitted_by}
-                                </p>
-                              </div>
-                              <button
-                                onClick={() => promoverTema(tema)}
-                                title="Agregar al Cancionero"
-                                className="shrink-0 p-2 rounded-full bg-neon-blue/10 hover:bg-neon-blue/20 text-neon-blue cursor-pointer transition-colors"
-                              >
-                                <ListPlus size={14} />
-                              </button>
-                              <button
-                                onClick={() => eliminarTema(tema)}
-                                title="Eliminar"
-                                className="shrink-0 p-2 rounded-full bg-white/5 hover:bg-red-500/10 text-white/40 hover:text-red-400 cursor-pointer transition-colors"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
                   <button
                     onClick={() => signOut()}
                     className="w-full flex items-center justify-center gap-2 p-3 bg-white/5 hover:bg-red-500/10 border border-white/5 hover:border-red-500/20 rounded-xl text-xs font-bold uppercase tracking-wider text-white/70 hover:text-red-400 transition-colors"
@@ -1093,6 +1048,32 @@ export default function Home() {
                 </span>
               </button>
             </header>
+
+            {/* Modo Participativo — always visible on the main screen (not tucked
+                behind a modal), so the QR is scannable and the queue readable at
+                any moment, per the host's explicit request. */}
+            {participativoEnabled && hostRow ? (
+              <ParticipativoPanel
+                hostRow={hostRow}
+                temasPublico={temasPublico}
+                canciones={canciones}
+                onRegenerarCodigo={regenerarCodigo}
+                onCantarAhora={cantarAhora}
+                onPromoverTema={promoverTema}
+                onEliminarTema={eliminarTema}
+                onAgregarManual={agregarTemaManual}
+              />
+            ) : (
+              <button
+                onClick={toggleParticipativo}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl border border-white/10 bg-white/5 hover:border-neon-blue/30 hover:bg-white/10 transition-all text-white/50 hover:text-white/80 cursor-pointer"
+              >
+                <QrCode size={16} />
+                <span className="text-xs font-bold uppercase tracking-widest">
+                  Activar Modo Participativo — mostrar QR para el público
+                </span>
+              </button>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="space-y-4">
@@ -1451,6 +1432,153 @@ export default function Home() {
           to { background-position: 200% center; }
         }
       `}</style>
+    </div>
+  );
+}
+
+interface ParticipativoPanelProps {
+  hostRow: HostRow;
+  temasPublico: TemaPublicoRow[];
+  canciones: Cancion[];
+  onRegenerarCodigo: () => void;
+  onCantarAhora: (tema: TemaPublicoRow) => void;
+  onPromoverTema: (tema: TemaPublicoRow) => void;
+  onEliminarTema: (tema: TemaPublicoRow) => void;
+  onAgregarManual: (nombre: string, cancion: Cancion) => void;
+}
+
+// Always-on-screen QR + live queue for Modo Participativo — the QR must stay
+// scannable at any moment (not behind a modal), and the queue it feeds (guest
+// submissions via /vivo/[code], or the host's own manual adds below) is the
+// visible "quién canta qué, en qué orden" run sheet as it builds up.
+function ParticipativoPanel({
+  hostRow,
+  temasPublico,
+  canciones,
+  onRegenerarCodigo,
+  onCantarAhora,
+  onPromoverTema,
+  onEliminarTema,
+  onAgregarManual,
+}: ParticipativoPanelProps) {
+  const [nombre, setNombre] = useState("");
+  const [cancionTitulo, setCancionTitulo] = useState("");
+
+  const handleAdd = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cancion = canciones.find((c) => c.titulo === cancionTitulo);
+    if (!nombre.trim() || !cancion) return;
+    onAgregarManual(nombre, cancion);
+    setNombre("");
+    setCancionTitulo("");
+  };
+
+  const joinUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/vivo/${hostRow.party_code}`;
+
+  return (
+    <div className="glass-card rounded-3xl p-6 border border-neon-blue/20 bg-white/5 backdrop-blur-md">
+      <div className="flex items-center gap-2 mb-4">
+        <QrCode className="text-neon-blue w-5 h-5" />
+        <h2 className="text-xl font-bold uppercase tracking-wider text-neon-blue">Modo Participativo</h2>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-6">
+        <div className="flex flex-col items-center gap-2 mx-auto lg:mx-0">
+          <div className="bg-white p-3 rounded-2xl">
+            <QRCode value={joinUrl} size={140} />
+          </div>
+          <p className="text-lg font-black tracking-[0.2em] text-neon-blue">{hostRow.party_code}</p>
+          <button
+            onClick={onRegenerarCodigo}
+            className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-white/70 transition-colors cursor-pointer"
+          >
+            <RefreshCw size={12} /> Regenerar código
+          </button>
+        </div>
+
+        <div className="space-y-3 min-w-0">
+          <form onSubmit={handleAdd} className="flex flex-col sm:flex-row gap-2">
+            <input
+              value={nombre}
+              onChange={(e) => setNombre(e.target.value)}
+              placeholder="Nombre del cantante..."
+              className="flex-1 min-w-0 rounded-xl px-4 py-2.5 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 text-sm text-white placeholder:text-white/20"
+            />
+            <select
+              value={cancionTitulo}
+              onChange={(e) => setCancionTitulo(e.target.value)}
+              className="flex-1 min-w-0 rounded-xl px-4 py-2.5 bg-white/5 border border-white/10 outline-hidden focus:border-white/20 text-sm text-white"
+            >
+              <option value="" className="bg-[#121212]">Elegir canción del cancionero...</option>
+              {canciones.map((c, i) => (
+                <option key={`${c.titulo}-${i}`} value={c.titulo} className="bg-[#121212]">
+                  {c.titulo} — {c.artista || "Desconocido"}
+                </option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={!nombre.trim() || !cancionTitulo}
+              className="shrink-0 flex items-center justify-center gap-1.5 px-4 py-2.5 bg-neon-blue/10 hover:bg-neon-blue/20 disabled:opacity-40 disabled:cursor-not-allowed border border-neon-blue/20 rounded-xl text-xs font-bold uppercase tracking-wider text-neon-blue cursor-pointer transition-colors"
+            >
+              <Plus size={14} /> Sumar
+            </button>
+          </form>
+
+          <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
+            <AnimatePresence initial={false}>
+              {temasPublico.map((tema, i) => (
+                <motion.div
+                  key={tema.id}
+                  initial={{ x: 20, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: -20, opacity: 0 }}
+                  className="flex items-center gap-3 p-2.5 rounded-xl bg-neon-blue/10 border border-neon-blue/20"
+                >
+                  <span className="shrink-0 w-5 text-center text-[10px] font-bold text-white/40">{i + 1}</span>
+                  {tema.youtube_thumbnail && (
+                    <div className="relative w-10 h-10 shrink-0 rounded-lg overflow-hidden bg-black">
+                      <Image src={tema.youtube_thumbnail} alt="" fill sizes="40px" className="object-cover" unoptimized />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold text-white truncate">{tema.submitted_by}</p>
+                    <p className="text-[10px] text-white/40 truncate">
+                      {tema.titulo}{tema.artista ? ` — ${tema.artista}` : ''}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => onCantarAhora(tema)}
+                    title="Cantar ahora"
+                    className="shrink-0 p-2 rounded-full bg-neon-pink/10 hover:bg-neon-pink/20 text-neon-pink cursor-pointer transition-colors"
+                  >
+                    <Play size={14} />
+                  </button>
+                  <button
+                    onClick={() => onPromoverTema(tema)}
+                    title="Agregar al Cancionero (sin cantar ahora)"
+                    className="shrink-0 p-2 rounded-full bg-white/5 hover:bg-white/10 text-white/50 cursor-pointer transition-colors"
+                  >
+                    <ListPlus size={14} />
+                  </button>
+                  <button
+                    onClick={() => onEliminarTema(tema)}
+                    title="Eliminar"
+                    className="shrink-0 p-2 rounded-full bg-white/5 hover:bg-red-500/10 text-white/40 hover:text-red-400 cursor-pointer transition-colors"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            {temasPublico.length === 0 && (
+              <div className="py-6 text-center opacity-40 italic text-sm">
+                Nadie en la cola todavía — escaneá el QR para sumarte.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

@@ -65,6 +65,10 @@ export interface HostRow {
     created_at: string;
 }
 
+// Doubles as the visible "quién canta qué" queue on the main screen: each row
+// pairs a singer name (submitted_by) with the exact song+version they (or the
+// host, manually) chose — youtube_video_id is what they actually picked in
+// the /vivo/[code] search, not re-derived from titulo/artista later.
 export interface TemaPublicoRow {
     id: string;
     user_id: string;
@@ -72,6 +76,11 @@ export interface TemaPublicoRow {
     artista: string | null;
     submitted_by: string;
     device_id: string;
+    // Always set for a guest submission (rpc_submit_tema_publico requires it);
+    // null for an entry the host added manually from the main screen without
+    // picking a specific video — the normal search runs when it goes on stage.
+    youtube_video_id: string | null;
+    youtube_thumbnail: string | null;
     created_at: string;
 }
 
