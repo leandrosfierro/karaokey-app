@@ -1355,6 +1355,9 @@ export default function Home() {
               <p className="text-xs uppercase tracking-widest font-bold">
                 Hecho con pasión por Karaokey Team
               </p>
+              <p className="text-[10px] uppercase tracking-widest text-white/30">
+                by LSF Producciones
+              </p>
             </footer>
           </motion.main>
         ) : view === 'cantante' ? (
