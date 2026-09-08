@@ -31,6 +31,7 @@ export interface DeckAdapter {
 interface LocalAudioDeckEvents {
     onReady: (event: DeckReadyEvent) => void;
     onStateChange: (event: DeckStateChangeEvent) => void;
+    onError?: (error: unknown) => void;
 }
 
 interface LocalAudioDeckOptions {
@@ -68,7 +69,9 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
             const AudioContextCtor: typeof AudioContext =
                 window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
             const ctx = new AudioContextCtor();
+            this.audioCtx = ctx;
             const response = await fetch(publicUrl);
+            if (!response.ok) throw new Error('No se pudo leer el archivo de audio.');
             const arrayBuffer = await response.arrayBuffer();
             const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
@@ -95,6 +98,8 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
             this.events.onReady({ target: this });
         } catch (err) {
             console.error('[LocalAudioDeckAdapter] Failed to load local track:', err);
+            this.events.onError?.(err);
+            this.destroy();
         }
     }
 
@@ -109,6 +114,7 @@ export class LocalAudioDeckAdapter implements DeckAdapter {
 
     playVideo() {
         if (!this.shifter || !this.gainNode || !this.audioCtx) return;
+        if (this.state === 1) return;
         if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
         this.shifter.connect(this.gainNode);
         this.state = 1;

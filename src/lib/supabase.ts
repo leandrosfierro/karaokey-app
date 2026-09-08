@@ -72,6 +72,7 @@ export interface HostRow {
 // host, manually) chose — youtube_video_id is what they actually picked in
 // the /vivo/[code] search, not re-derived from titulo/artista later.
 export interface TemaPublicoRow {
+    participantes?: string[] | null;
     status: 'review' | 'pending' | 'active' | 'done' | 'cancelled';
     approved_at: string | null;
     id: string;

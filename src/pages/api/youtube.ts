@@ -7,7 +7,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log('[YouTube API] Request received for query:', q);
     console.log('[YouTube API] API Key present:', !!YOUTUBE_API_KEY);
-    console.log('[YouTube API] API Key (first 10 chars):', YOUTUBE_API_KEY?.substring(0, 10));
 
     if (!q) {
         console.error('[YouTube API] Missing query parameter');
