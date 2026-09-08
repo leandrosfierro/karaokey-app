@@ -1,5 +1,25 @@
 @import 'tailwindcss';
 
+.kk-stage-queue { padding: 22px; border: 1px solid #ffffff20; border-radius: 22px; background: #171222; text-align: left; }
+.kk-queue-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.kk-stage-queue h2 { font-size: 1.35rem; font-weight: 750; }
+.kk-stage-queue p,.kk-queue-song small { color: #c5becf; font-size: .9rem; }
+.kk-stage-queue ol { display: grid; gap: 10px; }
+.kk-stage-queue li { display:flex; flex-wrap:wrap; align-items:center; gap:16px; padding:14px; border-radius:14px; background:#ffffff06; }
+.kk-queue-song { flex:1; min-width: min(180px,100%); display:grid; gap:4px; overflow-wrap:anywhere; }
+.kk-queue-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.kk-stage-queue button { min-height:44px; padding:10px 14px; border:1px solid #ff3b8160; background:#ff3b8118; border-radius:12px; cursor:pointer; font-weight:650; }
+.kk-stage-queue button:disabled { opacity:.4; cursor:not-allowed; }
+.kk-stage-queue button:focus-visible { outline:2px solid #00b7ed; outline-offset:3px; }
+.kk-performance-banner { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 20px; background:linear-gradient(110deg,#29112a,#15132c); border-bottom:1px solid #ffffff25; flex-shrink:0; }
+.kk-performance-banner[hidden] { display:none; }
+.kk-performance-banner>div { display:grid; gap:4px; min-width:0; }
+.kk-performance-banner strong { font-size:clamp(1.1rem,3vw,2rem); overflow-wrap:anywhere; }
+.kk-performance-banner span { color:#e6bad2; font-size:.85rem; }
+.kk-performance-banner p { flex-shrink:0; text-align:center; }
+.kk-performance-banner b { font-size:clamp(1.3rem,4vw,2.2rem); color:#ff82b0; font-variant-numeric:tabular-nums; }
+@media(max-width:420px) { .kk-performance-banner { padding:10px; gap:8px; } .kk-performance-banner p { max-width:95px; } .kk-stage-queue { padding:14px; } }
+
 @theme {
   --color-neon-pink: #ff3b81;
   --color-neon-blue: #00b7ed;

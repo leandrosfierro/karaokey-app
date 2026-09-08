@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Head from 'next/head';
+import { PerformanceBanner } from '../components/StageQueue';
 
 const ON_AIR_CHANNEL = 'karaokey-on-air';
 const HEARTBEAT_MS = 3000;
@@ -12,6 +13,8 @@ type DeckInfo = {
 };
 
 type MixMessage = {
+    performerName?: string;
+    aplausos?: number;
     type: 'mix';
     assistLevel: number;
     volA: number;
@@ -90,6 +93,8 @@ export default function PantallaExterna() {
     const [assistLevel, setAssistLevel] = useState(0);
     const [volA, setVolA] = useState(100);
     const [volB, setVolB] = useState(100);
+    const [performerName,setPerformerName]=useState('');
+    const [aplausos,setAplausos]=useState(0);
 
     const deckAPlayer = useRef<any>(null);
     const deckBPlayer = useRef<any>(null);
@@ -106,9 +111,15 @@ export default function PantallaExterna() {
         sendHello();
         const heartbeat = setInterval(sendHello, HEARTBEAT_MS);
 
-        channel.onmessage = (event: MessageEvent<MixMessage | SyncMessage>) => {
+        channel.onmessage = (event: MessageEvent<MixMessage | SyncMessage | {type:'closed'}>) => {
             const msg = event.data;
+            if(msg.type==='closed'){
+                setPerformerName('');setAplausos(0);
+                deckAPlayer.current?.pauseVideo?.();deckBPlayer.current?.pauseVideo?.();
+                return;
+            }
             if (msg.type === 'mix') {
+                setPerformerName(msg.performerName||'');setAplausos(msg.aplausos||0);
                 setDeckA(msg.deckA);
                 setDeckB(msg.deckB);
                 setAssistLevel(msg.assistLevel);
@@ -158,10 +169,12 @@ export default function PantallaExterna() {
     const opacityB = assistLevel;
 
     return (
-        <div className="min-h-screen w-screen bg-black overflow-hidden relative">
+        <div className="h-dvh w-screen bg-black overflow-hidden relative flex flex-col">
             <Head>
                 <title>Pantalla Externa — KaraoKey</title>
             </Head>
+            <PerformanceBanner name={performerName} count={aplausos}/>
+            <div className="relative flex-1 min-h-0">
 
             {idle ? (
                 <div className="min-h-screen w-screen flex items-center justify-center">
@@ -173,6 +186,7 @@ export default function PantallaExterna() {
                     <DeckLayer elementId="pantalla-externa-deck-b" info={deckB} opacity={opacityB} />
                 </>
             )}
+            </div>
         </div>
     );
 }

@@ -26,6 +26,8 @@ export interface ParticipanteRow {
 }
 
 export interface CancionRow {
+    youtube_video_id?: string | null;
+    youtube_thumbnail?: string | null;
     id: string;
     titulo: string;
     artista: string | null;
@@ -70,6 +72,8 @@ export interface HostRow {
 // host, manually) chose — youtube_video_id is what they actually picked in
 // the /vivo/[code] search, not re-derived from titulo/artista later.
 export interface TemaPublicoRow {
+    status: 'review' | 'pending' | 'active' | 'done' | 'cancelled';
+    approved_at: string | null;
     id: string;
     user_id: string;
     titulo: string;
@@ -85,6 +89,11 @@ export interface TemaPublicoRow {
 }
 
 export interface PerformanceRow {
+    ended_at: string | null;
+    managed: boolean;
+    turn_id: string | null;
+    youtube_video_id: string | null;
+    youtube_thumbnail: string | null;
     user_id: string;
     id: string;
     participantes: string[];

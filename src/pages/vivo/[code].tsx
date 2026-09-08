@@ -339,7 +339,7 @@ function Votar({
   // update is simply a new INSERT arriving, never an UPDATE/DELETE to chase.
   useEffect(() => {
     let cancelled = false;
-    supabase
+    const refresh=()=>supabase
       .from("karaokey_performances")
       .select("*")
       .eq("user_id", hostUserId)
@@ -347,20 +347,19 @@ function Votar({
       .limit(1)
       .maybeSingle()
       .then(({ data }) => {
-        if (!cancelled) setPerformance(data ?? null);
+        if (!cancelled) setPerformance(data?.ended_at ? null : data ?? null);
       });
+    void refresh();
+    const timer=setInterval(()=>{if(document.visibilityState==='visible')void refresh();},4000);
     const channel = supabase
       .channel(`performance-${hostUserId}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "karaokey_performances", filter: `user_id=eq.${hostUserId}` },
-        (payload) => {
-          const row = payload.new as Partial<PerformanceRow> | undefined;
-          if (row && Array.isArray(row.participantes)) setPerformance(row as PerformanceRow);
-        }
+        { event: "*", schema: "public", table: "karaokey_performances", filter: `user_id=eq.${hostUserId}` },
+        ()=>void refresh()
       )
       .subscribe();
-    return () => { cancelled = true; supabase.removeChannel(channel); };
+    return () => { cancelled = true;clearInterval(timer); supabase.removeChannel(channel); };
   }, [hostUserId]);
 
   // Live applause count for whichever performance is current — reseeded whenever

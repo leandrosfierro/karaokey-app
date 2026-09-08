@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/router";
 import Head from "next/head";
 import Image from "next/image";
@@ -12,10 +12,10 @@ import { TutorialOverlay } from "../components/TutorialOverlay";
 import { ModoPicker } from "../components/ModoPicker";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../lib/auth";
-import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow, HostRow, TemaPublicoRow } from "../lib/supabase";
-import { parseKaraokeVideoTitle, cancionCacheKey } from "../lib/youtube";
+import { supabase, isSupabaseConfigured, ParticipanteRow, CancionRow, ColaTurnoRow, HostRow, TemaPublicoRow, PerformanceRow } from "../lib/supabase";
+import { parseKaraokeVideoTitle } from "../lib/youtube";
 
-type Cancion = { titulo: string; artista?: string };
+type Cancion = { titulo: string; artista?: string; youtube_video_id?: string | null; youtube_thumbnail?: string | null };
 
 // "Título - Artista" (used by the one-by-one input and the bulk-paste textarea)
 function parseCancionLine(line: string): Cancion {
@@ -56,7 +56,7 @@ export default function Home() {
   const [cancionRows, setCancionRows] = useState<CancionRow[]>([]);
   const [colaRows, setColaRows] = useState<ColaTurnoRow[]>([]);
   const participantes = participanteRows.map((r) => r.nombre);
-  const canciones: Cancion[] = cancionRows.map((r) => ({ titulo: r.titulo, artista: r.artista ?? undefined }));
+  const canciones: Cancion[] = cancionRows.map((r) => ({ titulo: r.titulo, artista: r.artista ?? undefined, youtube_video_id:r.youtube_video_id, youtube_thumbnail:r.youtube_thumbnail }));
   const yaCantaron = participanteRows.filter((r) => r.ya_canto).map((r) => r.nombre);
 
   const [sorteo, setSorteo] = useState<SorteoResult | null>(null);
@@ -80,7 +80,51 @@ export default function Home() {
   const [hostRow, setHostRow] = useState<HostRow | null>(null);
   const [temasPublico, setTemasPublico] = useState<TemaPublicoRow[]>([]);
   const [currentPerformanceId, setCurrentPerformanceId] = useState<string | null>(null);
+  const [activePerformance, setActivePerformance] = useState<PerformanceRow | null>(null);
+  const [stageBusy, setStageBusy] = useState(false);
+  const stageLock = useRef(false);
   const participativoEnabled = hostRow?.participativo_enabled ?? false;
+
+  // Refresh on reconnect and while visible; queue updates also arrive through Realtime.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled=false;
+    const refresh=async()=>{
+      const [queue,performance]=await Promise.all([
+        supabase.from('karaokey_temas_publico').select('*').order('approved_at',{ascending:true,nullsFirst:false}).order('created_at'),
+        supabase.from('karaokey_performances').select('*').eq('user_id',user.id).eq('managed',true).is('ended_at',null).maybeSingle(),
+      ]);
+      if(cancelled || stageLock.current)return;
+      if(!queue.error)setTemasPublico(queue.data??[]);
+      if(!performance.error){setActivePerformance(performance.data);setCurrentPerformanceId(performance.data?.id??null);}
+    };
+    void refresh();
+    const visible=()=>{if(document.visibilityState==='visible')void refresh();};
+    const timer=setInterval(visible,4000);
+    window.addEventListener('focus',visible);window.addEventListener('online',visible);
+    return()=>{cancelled=true;clearInterval(timer);window.removeEventListener('focus',visible);window.removeEventListener('online',visible);};
+  },[user]);
+
+  const updateTurn = async (tema: TemaPublicoRow, status: 'pending'|'cancelled') => {
+    const {data,error}=await supabase.rpc('rpc_queue_status',{p_id:tema.id,p_status:status});
+    if(error){toast(error.message,{type:'error'});return;}
+    setTemasPublico(prev=>prev.map(t=>t.id===tema.id?data:t));
+  };
+  const finishStage = async (returnToQueue=false) => {
+    if(stageLock.current||!currentPerformanceId)return false;
+    stageLock.current=true;setStageBusy(true);
+    try {
+      const {error}=await supabase.rpc('rpc_stage_finish',{p_id:currentPerformanceId,p_return:returnToQueue});
+      if(error)throw error;
+      const names=activePerformance?.participantes??sorteo?.participantes??[];
+      if(!returnToQueue)setParticipanteRows(prev=>prev.map(p=>names.includes(p.nombre)?{...p,ya_canto:true}:p));
+      if(activePerformance?.turn_id)setTemasPublico(prev=>prev.map(t=>t.id===activePerformance.turn_id?{...t,status:returnToQueue?'pending':'done'}:t));
+      setCurrentPerformanceId(null);setActivePerformance(null);setView('setup');
+      toast(returnToQueue?'Turno devuelto a la cola.':'Actuación finalizada. Aplausos guardados.',{type:'success'});
+      return true;
+    } catch(error){toast((error as Error).message,{type:'error'});return false;}
+    finally {stageLock.current=false;setStageBusy(false);}
+  };
 
   // Load from Supabase — a brand-new account's tables are genuinely empty
   // (no demo participantes/canciones seeded into it; the empty-state copy
@@ -223,42 +267,21 @@ export default function Home() {
   // the karaokey_video_cache entry for that song — so whenever it's actually
   // played (now or later, from any source), it's the exact version someone
   // picked, not a fresh search that might land on something else.
-  const seedVideoCacheFromTema = (tema: TemaPublicoRow) => {
-    if (!tema.youtube_video_id) return;
-    supabase.from('karaokey_video_cache').upsert({
-      cancion_key: cancionCacheKey(tema.titulo, tema.artista ?? undefined),
-      karaoke_video_id: tema.youtube_video_id,
-      karaoke_alternatives: [{
-        id: tema.youtube_video_id,
-        title: tema.titulo,
-        thumbnail: tema.youtube_thumbnail ?? '',
-        channel: tema.artista ?? undefined,
-      }],
-    }, { onConflict: 'cancion_key' }).then(({ error }) => {
-      if (error) console.error('[KaraoKey] Failed to seed video cache from tema público:', error);
-    });
-  };
 
   // Sends this queue entry straight to the escenario — the singer's own name
   // as the performer, their chosen version pre-seeded so Deck A's auto-search
   // hits the cache instead of possibly finding a different upload.
   const cantarAhora = (tema: TemaPublicoRow) => {
-    seedVideoCacheFromTema(tema);
-    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
-    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error }) => {
-      if (error) console.error('[KaraoKey] Failed to remove tema after starting stage:', error);
-    });
-    startStage([tema.submitted_by], { titulo: tema.titulo, artista: tema.artista ?? undefined });
+    void startStage([tema.submitted_by], { titulo: tema.titulo, artista: tema.artista ?? undefined, youtube_video_id:tema.youtube_video_id,youtube_thumbnail:tema.youtube_thumbnail }, undefined, tema.id);
   };
 
   // Keeps the song in the general Cancionero (for future sorteos) without
   // starting the escenario now, and without removing this person from the
   // queue — they might still be sung via "Cantar ahora" later.
   const promoverTema = async (tema: TemaPublicoRow) => {
-    seedVideoCacheFromTema(tema);
     const { data, error } = await supabase
       .from('karaokey_canciones')
-      .insert({ titulo: tema.titulo, artista: tema.artista })
+      .insert({ titulo: tema.titulo, artista: tema.artista, youtube_video_id:tema.youtube_video_id,youtube_thumbnail:tema.youtube_thumbnail })
       .select()
       .single();
     if (error || !data) {
@@ -270,10 +293,7 @@ export default function Home() {
   };
 
   const eliminarTema = (tema: TemaPublicoRow) => {
-    setTemasPublico((prev) => prev.filter((t) => t.id !== tema.id));
-    supabase.from('karaokey_temas_publico').delete().eq('id', tema.id).then(({ error }) => {
-      if (error) toast('Error al eliminar en la base de datos.', { type: 'error' });
-    });
+    void updateTurn(tema,'cancelled');
   };
 
   // Lets the host add a {cantante, canción} entry straight to the same visible
@@ -291,6 +311,8 @@ export default function Home() {
         artista: cancion.artista ?? null,
         submitted_by: trimmed,
         device_id: 'anfitrion',
+        status: 'pending', approved_at:new Date().toISOString(),
+        youtube_video_id:cancion.youtube_video_id??null, youtube_thumbnail:cancion.youtube_thumbnail??null,
       })
       .select()
       .single();
@@ -349,6 +371,7 @@ export default function Home() {
   };
 
   const pedirSorteo = async () => {
+    if(currentPerformanceId){toast('Finalizá la actuación actual antes de volver a sortear.',{type:'info'});return;}
     if (participantes.length === 0 || canciones.length === 0) return;
     if (modoDuo && participantes.length < 2) {
       toast("Necesitás al menos 2 participantes para el modo dúo", { type: 'error' });
@@ -397,22 +420,31 @@ export default function Home() {
     });
   };
 
-  const startStage = (p: string[], c: Cancion, challenge?: string) => {
+  const startStage = async (p: string[], c: Cancion, challenge?: string, turnId?:string) => {
+    if(stageLock.current)return false;
+    stageLock.current=true;setStageBusy(true);
+    try {
+    const {data,error}=await supabase.rpc('rpc_stage_start',{p_participantes:p,p_titulo:c.titulo,p_artista:c.artista??null,p_video:c.youtube_video_id??null,p_thumbnail:c.youtube_thumbnail??null,p_turn:turnId??null});
+    if(error){toast(error.message,{type:'error'});return false;}
+    setActivePerformance(data);setCurrentPerformanceId(data.id);
+    if(turnId)setTemasPublico(prev=>prev.map(t=>t.id===turnId?{...t,status:'active'}:t));
     setSorteo({
       participantes: p,
       cancion: c,
       desafio: challenge || "¡A darlo todo!",
       id: Date.now().toString()
     });
-    marcarYaCantaron(p);
-    publishPerformance(p, c);
     confetti.reset();
     setView('player');
     setShowWinnerModal(false);
+    return true;
+    } catch(error){toast((error as Error).message,{type:'error'});}
+    finally {stageLock.current=false;setStageBusy(false);}
   };
 
   // "Solo Cantante" mode: no song, no escenario — just reveal who's up next.
   const revealCantante = (p: string[]) => {
+    if(currentPerformanceId){toast('Finalizá la actuación actual antes de iniciar otra.',{type:'info'});return;}
     setSorteoCantante(p);
     marcarYaCantaron(p);
     publishPerformance(p, null);
@@ -491,23 +523,23 @@ export default function Home() {
     if (error) toast('Error al vaciar en la base de datos.', { type: 'error' });
   };
 
-  const siguienteTurno = () => {
+  const siguienteTurno = async () => {
+    if(currentPerformanceId||stageBusy){toast('Finalizá la actuación actual antes de avanzar.',{type:'info'});return;}
     const pendientes = colaRows.filter((r) => !r.ya_canto);
     if (pendientes.length === 0) {
       toast('No hay nadie más en la cola', { type: 'error' });
       return;
     }
     const next = pendientes[0];
-    setColaRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ya_canto: true } : r)));
-    supabase.from('karaokey_cola_turnos').update({ ya_canto: true }).eq('id', next.id).then(({ error }) => {
-      if (error) console.error('[KaraoKey] Failed to save turno ya_canto:', error);
-    });
-
     if (modoSorteo === 'cantante') {
       revealCantante([next.nombre]);
     } else {
-      startStage([next.nombre], { titulo: next.cancion_titulo, artista: next.cancion_artista ?? undefined });
+      const started = await startStage([next.nombre], { titulo: next.cancion_titulo, artista: next.cancion_artista ?? undefined });
+      if (!started) return;
     }
+    const { error } = await supabase.from('karaokey_cola_turnos').update({ ya_canto: true }).eq('id', next.id);
+    if (error) { toast('No se pudo actualizar la cola. Revisá el turno antes de avanzar.', { type: 'error' }); return; }
+    setColaRows((prev) => prev.map((r) => (r.id === next.id ? { ...r, ya_canto: true } : r)));
   };
 
   const handleManualStart = () => {
@@ -1014,6 +1046,14 @@ export default function Home() {
         )}
       </AnimatePresence>
 
+      <nav aria-label="Secciones de Karaokey" className="max-w-6xl mx-auto mb-6 flex flex-wrap gap-2">
+        <button className="min-h-11 px-4 rounded-xl border border-white/15 bg-white/5" onClick={()=>setView('setup')}>Mi fiesta</button>
+        <button className="min-h-11 px-4 rounded-xl border border-white/15 bg-white/5" onClick={()=>{setView('setup');setTimeout(()=>document.getElementById('proximos-turnos')?.scrollIntoView({behavior:'smooth'}),400);}}>Próximos turnos</button>
+        <button className="min-h-11 px-4 rounded-xl border border-white/15 bg-white/5" onClick={()=>setShowSettings(true)}>Sumar canciones</button>
+        {activePerformance && <button className="min-h-11 px-4 rounded-xl border border-neon-pink/40 bg-neon-pink/10" onClick={()=>{
+          setSorteo({id:activePerformance.id,participantes:activePerformance.participantes,cancion:{titulo:activePerformance.cancion_titulo||'',artista:activePerformance.cancion_artista||undefined,youtube_video_id:activePerformance.youtube_video_id,youtube_thumbnail:activePerformance.youtube_thumbnail},desafio:''});setView('player');
+        }}>Volver al escenario · {activePerformance.participantes.join(' & ')}</button>}
+      </nav>
       <AnimatePresence mode="wait">
         {view === 'setup' ? (
           <motion.main
@@ -1062,6 +1102,8 @@ export default function Home() {
                 onPromoverTema={promoverTema}
                 onEliminarTema={eliminarTema}
                 onAgregarManual={agregarTemaManual}
+                onApprove={(tema)=>void updateTurn(tema,'pending')}
+                stageActive={!!currentPerformanceId}
               />
             ) : (
               <button
@@ -1399,12 +1441,15 @@ export default function Home() {
             song={sorteo!.cancion}
             challenge={sorteo!.desafio}
             onBack={() => setView('setup')}
-            onNext={() => {
-              setView('setup');
-              setTimeout(() => modoTurnos ? siguienteTurno() : pedirSorteo(), 500);
-            }}
+            onNext={() => { void finishStage().then(done=>{if(done)toast('Actuación finalizada. Ya podés elegir o sortear el próximo turno.',{type:'success'});}); }}
             simple={modo === 'simple'}
             currentPerformanceId={currentPerformanceId ?? undefined}
+            performerName={activePerformance?.participantes.join(' & ') || sorteo?.participantes.join(' & ') || ''}
+            queue={temasPublico}
+            onStartTurn={cantarAhora}
+            onFinish={()=>void finishStage()}
+            onReturnTurn={activePerformance?.turn_id?()=>void finishStage(true):undefined}
+            stageBusy={stageBusy}
           />
         ) : (
           // Modo DJ — standalone Karaokey Pro player, no sorteo dependency: both
@@ -1415,6 +1460,9 @@ export default function Home() {
             key="dj-mixer"
             onBack={() => setView('setup')}
             cancionero={canciones}
+            queue={temasPublico}
+            onStartTurn={cantarAhora}
+            stageBusy={stageBusy}
           />
         )}
       </AnimatePresence>
@@ -1440,6 +1488,8 @@ export default function Home() {
 }
 
 interface ParticipativoPanelProps {
+  onApprove: (tema:TemaPublicoRow)=>void;
+  stageActive: boolean;
   hostRow: HostRow;
   temasPublico: TemaPublicoRow[];
   canciones: Cancion[];
@@ -1463,6 +1513,8 @@ function ParticipativoPanel({
   onPromoverTema,
   onEliminarTema,
   onAgregarManual,
+  onApprove,
+  stageActive,
 }: ParticipativoPanelProps) {
   const [nombre, setNombre] = useState("");
   const [cancionTitulo, setCancionTitulo] = useState("");
@@ -1479,10 +1531,10 @@ function ParticipativoPanel({
   const joinUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/vivo/${hostRow.party_code}`;
 
   return (
-    <div className="glass-card rounded-3xl p-6 border border-neon-blue/20 bg-white/5 backdrop-blur-md">
+    <div id="proximos-turnos" className="glass-card rounded-3xl p-6 border border-neon-blue/20 bg-white/5 backdrop-blur-md scroll-mt-24">
       <div className="flex items-center gap-2 mb-4">
         <QrCode className="text-neon-blue w-5 h-5" />
-        <h2 className="text-xl font-bold uppercase tracking-wider text-neon-blue">Modo Participativo</h2>
+        <h2 className="text-xl font-bold text-neon-blue">Próximos turnos · Participación del público</h2>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-6">
@@ -1530,13 +1582,13 @@ function ParticipativoPanel({
 
           <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
             <AnimatePresence initial={false}>
-              {temasPublico.map((tema, i) => (
+              {temasPublico.filter(t=>!['done','active'].includes(t.status)).sort((a,b)=>(a.approved_at||a.created_at).localeCompare(b.approved_at||b.created_at)||a.id.localeCompare(b.id)).map((tema, i) => (
                 <motion.div
                   key={tema.id}
                   initial={{ x: 20, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
                   exit={{ x: -20, opacity: 0 }}
-                  className="flex items-center gap-3 p-2.5 rounded-xl bg-neon-blue/10 border border-neon-blue/20"
+                  className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-neon-blue/10 border border-neon-blue/20"
                 >
                   <span className="shrink-0 w-5 text-center text-[10px] font-bold text-white/40">{i + 1}</span>
                   {tema.youtube_thumbnail && (
@@ -1546,17 +1598,12 @@ function ParticipativoPanel({
                   )}
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-bold text-white truncate">{tema.submitted_by}</p>
+                    <p className="text-xs text-neon-blue">{tema.status==='review'?'Por aprobar':tema.status==='cancelled'?'Retirado':'Aprobado'}</p>
                     <p className="text-[10px] text-white/40 truncate">
                       {tema.titulo}{tema.artista ? ` — ${tema.artista}` : ''}
                     </p>
                   </div>
-                  <button
-                    onClick={() => onCantarAhora(tema)}
-                    title="Cantar ahora"
-                    className="shrink-0 p-2 rounded-full bg-neon-pink/10 hover:bg-neon-pink/20 text-neon-pink cursor-pointer transition-colors"
-                  >
-                    <Play size={14} />
-                  </button>
+                  {tema.status==='pending' ? <button disabled={stageActive} onClick={()=>onCantarAhora(tema)} className="min-h-11 px-3 rounded-xl bg-neon-pink/15 text-neon-pink disabled:opacity-40">Iniciar turno</button> : <button onClick={()=>onApprove(tema)} className="min-h-11 px-3 rounded-xl bg-neon-blue/15 text-neon-blue">{tema.status==='cancelled'?'Restaurar turno':'Aprobar'}</button>}
                   <button
                     onClick={() => onPromoverTema(tema)}
                     title="Agregar al Cancionero (sin cantar ahora)"
@@ -1565,8 +1612,9 @@ function ParticipativoPanel({
                     <ListPlus size={14} />
                   </button>
                   <button
+                    disabled={tema.status==='cancelled'}
                     onClick={() => onEliminarTema(tema)}
-                    title="Eliminar"
+                    title="Retirar turno"
                     className="shrink-0 p-2 rounded-full bg-white/5 hover:bg-red-500/10 text-white/40 hover:text-red-400 cursor-pointer transition-colors"
                   >
                     <Trash2 size={14} />
@@ -1579,6 +1627,7 @@ function ParticipativoPanel({
                 Nadie en la cola todavía — escaneá el QR para sumarte.
               </div>
             )}
+            {temasPublico.some(t=>t.status==='done') && <details className="mt-4 rounded-xl border border-white/10 p-4"><summary className="cursor-pointer font-semibold">Actuaciones finalizadas ({temasPublico.filter(t=>t.status==='done').length})</summary><ul className="mt-3 space-y-2">{temasPublico.filter(t=>t.status==='done').map(t=><li key={t.id} className="text-sm"><strong>{t.submitted_by}</strong> · {t.titulo}</li>)}</ul></details>}
           </div>
         </div>
       </div>

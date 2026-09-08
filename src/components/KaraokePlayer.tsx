@@ -5,7 +5,8 @@ import { Maximize2, Minimize2, ArrowLeft, RefreshCw, Trophy, Mic2, Music, Volume
 import { motion } from 'framer-motion';
 import { useToast } from './Toast';
 import { useAuth } from '../lib/auth';
-import { supabase, LocalAudioRow } from '../lib/supabase';
+import { supabase, LocalAudioRow, TemaPublicoRow } from '../lib/supabase';
+import { StageQueue, PerformanceBanner } from './StageQueue';
 import { DeckAdapter, LocalAudioDeckAdapter } from '../lib/deckAdapter';
 import { VideoResult, mapYoutubeItemToVideoResult, cancionCacheKey } from '../lib/youtube';
 
@@ -51,7 +52,13 @@ function isIOSDevice(): boolean {
 // loading a plain (non-"karaoke") search result into the other deck.
 
 interface KaraokePlayerProps {
-    song?: { titulo: string; artista?: string };
+    song?: { titulo: string; artista?: string; youtube_video_id?:string|null; youtube_thumbnail?:string|null };
+    performerName?: string;
+    queue?: TemaPublicoRow[];
+    onStartTurn?: (turn:TemaPublicoRow)=>void;
+    onFinish?: ()=>void;
+    onReturnTurn?: ()=>void;
+    stageBusy?: boolean;
     challenge?: string;
     onBack: () => void;
     onNext?: () => void;
@@ -75,7 +82,8 @@ interface KaraokePlayerProps {
 
 // Cache-checked karaoke search, shared by the sorteo auto-load (Deck A on mount)
 // and the standalone "Mi Cancionero" loader (either deck, on demand).
-async function searchKaraokeVideo(cancion: { titulo: string; artista?: string }): Promise<{ videoId: string | null; alternatives: VideoResult[] }> {
+async function searchKaraokeVideo(cancion: { titulo: string; artista?: string; youtube_video_id?:string|null;youtube_thumbnail?:string|null }): Promise<{ videoId: string | null; alternatives: VideoResult[] }> {
+    if(cancion.youtube_video_id)return {videoId:cancion.youtube_video_id,alternatives:[{id:cancion.youtube_video_id,title:cancion.titulo,thumbnail:cancion.youtube_thumbnail||'',channel:cancion.artista}]};
     const cacheKey = cancionCacheKey(cancion.titulo, cancion.artista);
 
     const { data: cached } = await supabase
@@ -122,7 +130,7 @@ declare global {
 type DeckKind = 'youtube' | 'local';
 type DeckLetter = 'A' | 'B';
 
-export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero, simple = false, currentPerformanceId }) => {
+export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, onBack, onNext, cancionero, simple = false, currentPerformanceId, performerName='',queue=[],onStartTurn,onFinish,onReturnTurn,stageBusy=false }) => {
     const toast = useToast();
     const { user } = useAuth();
     const [isFullscreen, setIsFullscreen] = useState(false);
@@ -131,6 +139,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     // the case, this is a CSS-only "fake fullscreen" fallback (fixed, covers the
     // viewport) instead of leaving the button doing nothing.
     const [cssFullscreen, setCssFullscreen] = useState(false);
+    const [prepared,setPrepared]=useState<{A?:string;B?:string}>({});
+    const [preparing,setPreparing]=useState(false);
+    const preparingRef=useRef(false);
     const [loading, setLoading] = useState(true);
     const videoRowRef = useRef<HTMLDivElement>(null);
     const hasFetched = useRef(false);
@@ -164,6 +175,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 });
         };
         refresh();
+        const refreshVisible=()=>{if(document.visibilityState==='visible')refresh();};
+        const applauseTimer=setInterval(refreshVisible,4000);
+        window.addEventListener('focus',refreshVisible);
         const channel = supabase
             .channel(`aplausos-${currentPerformanceId}`)
             .on(
@@ -172,7 +186,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 refresh
             )
             .subscribe();
-        return () => { supabase.removeChannel(channel); };
+        return () => { clearInterval(applauseTimer);window.removeEventListener('focus',refreshVisible);supabase.removeChannel(channel); };
     }, [currentPerformanceId]);
     /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -271,7 +285,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                 if (mixStateRef.current) channel.postMessage(mixStateRef.current);
             }
         };
-        return () => channel.close();
+        return () => { channel.postMessage({type:'closed'});channel.close(); };
     }, []);
 
     // Drop the connection if the external tab stops sending heartbeats (closed, crashed).
@@ -297,12 +311,13 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             assistLevel,
             volA,
             volB,
+            performerName, aplausos,
             deckA: { kind: deckAKind, videoId: deckAVideoId, titulo: deckALocalTrack?.titulo ?? null, artista: deckALocalTrack?.artista ?? null },
             deckB: { kind: deckBKind, videoId: deckBVideoId, titulo: deckBLocalTrack?.titulo ?? null, artista: deckBLocalTrack?.artista ?? null },
         };
         mixStateRef.current = payload;
         onAirChannelRef.current?.postMessage(payload);
-    }, [assistLevel, volA, volB, deckAKind, deckAVideoId, deckALocalTrack, deckBKind, deckBVideoId, deckBLocalTrack]);
+    }, [assistLevel, volA, volB, deckAKind, deckAVideoId, deckALocalTrack, deckBKind, deckBVideoId, deckBLocalTrack,performerName,aplausos]);
 
     // Periodic time-sync tick for each YouTube deck, so the external window's
     // mirrored players don't visibly/audibly drift out of sync over a long song.
@@ -388,6 +403,18 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
     const selectDeckBYoutube = (id: string) => { setDeckBKind('youtube'); setDeckBVideoId(id); };
     const selectDeckBLocal = (track: LocalAudioRow) => { setDeckBKind('local'); setDeckBLocalTrack(track); };
 
+    const prepareTurn=async(turn:TemaPublicoRow,deck:DeckLetter)=>{
+        const player=deck==='A'?deckAPlayer.current:deckBPlayer.current;
+        if(preparingRef.current || (deckReady(player)&&player.getPlayerState()===1))return;
+        preparingRef.current=true;setPreparing(true);
+        try {
+            if(!turn.youtube_video_id){toast('Este turno todavía no tiene una versión elegida. Iniciá el turno para buscarla.',{type:'info'});return;}
+            const video={id:turn.youtube_video_id,title:turn.titulo,thumbnail:turn.youtube_thumbnail||'',channel:turn.artista||undefined};
+            if(deck==='A'){setDeckAAlternatives([video]);selectDeckAYoutube(video.id);}else{setDeckBAlternatives([video]);selectDeckBYoutube(video.id);}
+            setPrepared(prev=>({...prev,[deck]:turn.id}));
+        } finally {preparingRef.current=false;setPreparing(false);}
+    };
+
     // "Mi Cancionero" — load a song from the app's own saved list into a deck on
     // demand (searches/caches exactly like the sorteo auto-load, just triggered
     // manually and targeting whichever deck the host picked).
@@ -430,6 +457,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
             if (hasFetched.current || !song) return;
             hasFetched.current = true;
             try {
+                if(song.youtube_video_id){setDeckAAlternatives([{id:song.youtube_video_id,title:song.titulo,thumbnail:song.youtube_thumbnail||'',channel:song.artista}]);setDeckAVideoId(song.youtube_video_id);return;}
                 const { videoId, alternatives } = await searchKaraokeVideo(song);
                 setDeckAAlternatives(alternatives);
                 if (videoId) setDeckAVideoId(videoId);
@@ -775,6 +803,9 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                     </div>
                 )}
 
+                {!cssFullscreen && !isFullscreen && onStartTurn && <StageQueue rows={queue} simple={simple} onStart={onStartTurn} onPrepare={(turn,deck)=>void prepareTurn(turn,deck)} busy={stageBusy||preparing} blockedA={deckAIsPlaying||!!currentPerformanceId} blockedB={deckBIsPlaying} prepared={{A:queue.some(t=>t.id===prepared.A&&t.youtube_video_id===deckAVideoId)?prepared.A:undefined,B:queue.some(t=>t.id===prepared.B&&t.youtube_video_id===deckBVideoId)?prepared.B:undefined}} onManage={onBack}/>}
+                {currentPerformanceId && onFinish && <div className="flex flex-wrap justify-center gap-3"><button disabled={stageBusy} onClick={onFinish} className="min-h-11 px-5 py-3 rounded-xl bg-neon-pink/20 border border-neon-pink/40">Finalizar actuación</button>{onReturnTurn&&<button disabled={stageBusy} onClick={onReturnTurn} className="min-h-11 px-5 py-3 rounded-xl border border-white/20">Devolver a la cola</button>}</div>}
+
                 {/* Simple mode has the whole width to itself — a wider column than Pro's
                     two-up grid gives the single deck's video real prominence instead of
                     floating in a narrow strip. cssFullscreen covers the CSS-only fallback
@@ -789,7 +820,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                             : (simple ? "grid grid-cols-1 gap-6 bg-[#0a0a0a] max-w-3xl mx-auto w-full" : "grid grid-cols-1 md:grid-cols-2 gap-6 bg-[#0a0a0a]")
                     }
                 >
-                    {cssFullscreen && (
+                    {(cssFullscreen || isFullscreen) && (
                         // A normal in-flow button, not another `fixed` one — this container
                         // is itself trapped inside an ancestor with a CSS transform (framer-
                         // motion's animate={{y:...}}), which makes any `position:fixed`
@@ -804,6 +835,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                             <Minimize2 size={16} /> Salir de Pantalla Completa
                         </button>
                     )}
+                    <div className={simple?'':'md:col-span-2'} hidden={!performerName}><PerformanceBanner name={performerName} count={aplausos}/></div>
                     <DeckPanel
                         label="DECK A"
                         accent="pink"
@@ -989,7 +1021,7 @@ export const KaraokePlayer: React.FC<KaraokePlayerProps> = ({ song, challenge, o
                             onClick={onNext}
                             className="px-8 py-3 rounded-2xl bg-linear-to-r from-[#FF3B81] to-[#9D4EDD] hover:scale-105 active:scale-95 transition-all flex items-center gap-2 font-bold uppercase tracking-widest text-sm cursor-pointer"
                         >
-                            <RefreshCw size={18} className="animate-[spin_4s_linear_infinite]" /> Siguiente Sorteo
+                            <RefreshCw size={18} /> {onFinish ? 'Finalizar y ver turnos' : 'Siguiente sorteo'}
                         </button>
                     )}
                 </div>
@@ -1370,7 +1402,7 @@ function SearchBox({ placeholder, onResults, onSelect }: SearchBoxProps) {
 
             const results: VideoResult[] = (data.items || []).map(mapYoutubeItemToVideoResult);
             onResults(results);
-            if (results.length > 0) onSelect(results[0].id);
+            if (results.length === 0) toast('No se encontraron videos. Probá con otro título.',{type:'info'});
         } catch (err) {
             toast(
                 err instanceof Error && err.message === 'quota_exceeded'
