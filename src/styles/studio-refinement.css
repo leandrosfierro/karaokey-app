@@ -1,0 +1,319 @@
+/* Refinement layer shared by production and the isolated rehearsal routes. */
+.trial .trial-tabs {
+  gap: 6px;
+  align-items: stretch;
+}
+.trial .trial-tabs > button {
+  flex: 1 0 110px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.trial-header {
+  padding: 16px 24px;
+  gap: 12px;
+}
+.trial-header .trial-tabs {
+  margin-left: auto;
+}
+.trial-header .trial-tabs > button {
+  flex-basis: auto;
+}
+.studio-account {
+  position: relative;
+}
+.studio-account summary,
+.studio-row-menu summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px;
+  border-radius: 12px;
+}
+.studio-account summary:focus-visible,
+.studio-row-menu summary:focus-visible {
+  outline: 2px solid #00b7ed;
+  outline-offset: 2px;
+}
+.studio-account-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 70;
+  width: min(270px, 85vw);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  background: #181222;
+  border: 1px solid #ffffff30;
+  border-radius: 14px;
+  box-shadow: 0 15px 40px #0008;
+}
+.studio-account-menu a,
+.studio-account-menu button {
+  text-align: left;
+  min-height: 44px;
+  padding: 10px;
+}
+.studio-progress {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.studio-progress li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  min-width: 0;
+  padding: 8px 0;
+}
+.studio-progress li > span {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid #81748e;
+  border-radius: 50%;
+}
+.studio-progress li[data-done="true"] > span {
+  background: #ff3b81;
+  border-color: #ff3b81;
+  color: white;
+}
+.studio-row-menu {
+  margin-left: auto;
+  width: fit-content;
+}
+.studio-row-menu > button {
+  min-height: 44px;
+  color: #ffb7cf;
+  padding: 12px;
+}
+.studio-queue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.studio-queue-filters > .trial-tabs {
+  flex: 1;
+}
+.studio-queue-filters label {
+  min-width: 120px;
+}
+.dj-console {
+  --deck-color: #ff589a;
+}
+.dj-console-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px;
+  background: linear-gradient(130deg, #20132f, #0c1522);
+  border: 1px solid #ffffff1c;
+  border-radius: 18px;
+}
+.dj-console-heading label {
+  width: 100%;
+}
+.dj-console .trial-player-grid.pro {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.dj-console .trial-deck {
+  border: 1px solid color-mix(in srgb, var(--deck-color) 50%, transparent);
+  border-top: 3px solid var(--deck-color);
+  background: linear-gradient(160deg, #201d28, #101017);
+  border-radius: 18px;
+  box-shadow:
+    inset 0 1px #ffffff12,
+    0 10px 30px #0005;
+}
+.dj-console .trial-deck[data-deck="B"] {
+  --deck-color: #00b7ed;
+}
+.dj-console .trial-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.dj-console .trial-controls > .trial-volume,
+.dj-console .trial-controls > .trial-muted {
+  grid-column: 1/-1;
+}
+.dj-console .trial-play,
+.dj-pad {
+  width: 100%;
+  min-height: 60px;
+  border-radius: 12px;
+  border: 1px solid #ffffff25;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  background: linear-gradient(#37303f, #1b1820);
+  color: #f7f4ff;
+  box-shadow:
+    inset 0 1px #ffffff25,
+    0 3px 0 #050406;
+}
+.dj-console .trial-play {
+  background: var(--deck-color);
+  color: #090910;
+}
+.dj-pad span {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.dj-pad.cue {
+  color: var(--deck-color);
+  border-color: var(--deck-color);
+}
+.dj-pad.stop {
+  color: #ffc2d3;
+}
+.dj-pad:active:not(:disabled),
+.dj-console .trial-play:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow: none;
+}
+.dj-time-display {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #090b10;
+  border: 1px solid #ffffff18;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.dj-time-display > span,
+.dj-time-display small {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: #c4c0ce;
+}
+.dj-time-display strong {
+  grid-column: 1/-1;
+  grid-row: 2;
+  font:
+    700 2rem ui-monospace,
+    monospace;
+  color: var(--deck-color);
+}
+.dj-console .trial-mixer {
+  margin: 0;
+  padding: 18px;
+  border-radius: 18px;
+  background: linear-gradient(#25212e, #111017);
+  border: 1px solid #ffffff25;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.dj-console .trial-mixer h2 {
+  font-size: 1.1rem;
+}
+.dj-console .trial-mixer .trial-section-heading {
+  flex-direction: column;
+  align-items: start;
+}
+.dj-console .trial-mixer .trial-inline {
+  display: grid;
+}
+.dj-channel-faders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  background: #08090d;
+  padding: 16px 8px;
+  border-radius: 12px;
+}
+.dj-channel-faders label {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+}
+.dj-channel-faders input {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 36px;
+  height: 130px;
+  accent-color: #ff589a;
+}
+.dj-channel-faders [data-channel="B"] input {
+  accent-color: #00b7ed;
+}
+.dj-channel-faders output {
+  font:
+    700 1rem ui-monospace,
+    monospace;
+}
+.trial-fullscreen .trial-mixer {
+  display: none;
+}
+@media (min-width: 1200px) {
+  .dj-console .trial-player-grid.pro {
+    grid-template-columns: minmax(0, 1fr) 255px minmax(0, 1fr);
+  }
+  .dj-console .trial-fullscreen .trial-player-grid.pro {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .trial-header {
+    padding: 12px 16px;
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+  }
+  .trial-header .trial-brand {
+    grid-column: 1;
+  }
+  .trial-header .trial-tabs {
+    grid-row: 2;
+    grid-column: 1/-1;
+    margin: 0;
+  }
+  .trial-header .trial-tabs > button {
+    flex: 1;
+    min-height: 40px;
+    padding: 8px;
+  }
+  .studio-progress li {
+    flex-direction: column;
+    text-align: center;
+    font-size: 0.78rem;
+  }
+  .trial .trial-tabs > button {
+    padding: 10px;
+  }
+  .dj-console .trial-mixer {
+    order: 3;
+  }
+  .dj-channel-faders input {
+    height: 100px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .trial *,
+  .trial *::before,
+  .trial *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

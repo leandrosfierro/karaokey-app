@@ -115,7 +115,7 @@ export default function VivoPage() {
                   onClick={() => setTab("votar")}
                   className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all cursor-pointer ${tab === "votar" ? "bg-neon-blue/20 text-white" : "text-white/40 hover:text-white/70"}`}
                 >
-                  <HandMetal size={14} /> Votar
+                  <HandMetal size={14} /> Aplaudir
                 </button>
               </div>
 

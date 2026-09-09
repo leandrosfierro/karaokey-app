@@ -43,3 +43,29 @@ export function mixVolumes(
   const x = clamp(mix, 1);
   return [(1 - x) * clamp(a, 100), x * clamp(b, 100)];
 }
+
+// Do not fade away from an audible deck until the incoming media really starts.
+export function waitForPlayback(
+  readPlaying: () => boolean,
+  timeoutMs = 4000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      if (readPlaying()) {
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(
+          new Error(
+            "El navegador no inició el nuevo video. Tocá Reproducir en el deck preparado.",
+          ),
+        );
+        return;
+      }
+      setTimeout(check, Math.min(50, timeoutMs));
+    };
+    check();
+  });
+}

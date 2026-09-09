@@ -6,3 +6,5 @@ node_modules
 .DS_Store
 public/tw.css
 tsconfig.tsbuildinfo
+.karaokey-preview/
+.next-preview/

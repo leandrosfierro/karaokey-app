@@ -13,12 +13,17 @@ import {
   Flag,
   Square,
   Music2,
+  Radio,
 } from "lucide-react";
 import type { PreviewSong, PreviewTurn } from "../../lib/preview/model";
 import { Modal, SongBrowser, SongRow, Notice } from "./Shared";
 import type { SongSearch } from "./Shared";
 import { useDeck, localFiles } from "./useDeck";
-import { validTransport, mixVolumes } from "../../lib/studio-output";
+import {
+  validTransport,
+  mixVolumes,
+  waitForPlayback,
+} from "../../lib/studio-output";
 import type { RemoteState, TransportAction } from "../../lib/studio-output";
 
 type Deck = ReturnType<typeof useDeck>;
@@ -63,6 +68,7 @@ export function PreviewPlayer({
   authoritative = false,
   celebration = null,
   performanceDeck = "A",
+  onHandoff,
 }: {
   mode: "simple" | "pro";
   song: PreviewSong | null;
@@ -79,6 +85,7 @@ export function PreviewPlayer({
   authoritative?: boolean;
   celebration?: Celebration | null;
   performanceDeck?: "A" | "B";
+  onHandoff?: (turn: PreviewTurn, deck: "A" | "B") => Promise<void>;
 }) {
   const [a, setA] = useState<PreviewSong | null>(null);
   const [b, setB] = useState<PreviewSong | null>(null);
@@ -88,6 +95,7 @@ export function PreviewPlayer({
   const [volB, setVolB] = useState(100);
   const [source, setSource] = useState<"A" | "B" | null>(null);
   const [filesFor, setFilesFor] = useState<"A" | "B" | null>(null);
+  const [preflight, setPreflight] = useState(false);
   const [files, setFiles] = useState<PreviewSong[]>([]);
   const [fileError, setFileError] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -102,6 +110,15 @@ export function PreviewPlayer({
   const [mobileIOS, setMobileIOS] = useState(false);
   const [autoMix, setAutoMix] = useState(false);
   const [ramping, setRamping] = useState(false);
+  const [continuous, setContinuous] = useState(false);
+  const [fadeSeconds, setFadeSeconds] = useState(4);
+  const handoff = useRef<{ deck: "A" | "B" } | null>(null);
+  const transitionLock = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const row = useRef<HTMLDivElement>(null);
   const channel = useRef<BroadcastChannel | null>(null);
   const channelId = useRef("");
@@ -158,7 +175,12 @@ export function PreviewPlayer({
   const reportedEnd = useRef<string | null>(null);
   const playedPerformance = useRef<string | null>(null);
   useEffect(() => {
-    if (!performanceId || !song?.id || reportedEnd.current === performanceId)
+    if (
+      !performanceId ||
+      !song?.id ||
+      reportedEnd.current === performanceId ||
+      transitionLock.current
+    )
       return;
     if (performanceDeck === "B" ? deckB.playing : deckA.playing)
       playedPerformance.current = performanceId;
@@ -181,6 +203,7 @@ export function PreviewPlayer({
     deckB.playing,
     performanceDeck,
     onEnded,
+    ramping,
   ]);
   useEffect(() => {
     latest.current = { deckA, deckB, signature };
@@ -199,10 +222,10 @@ export function PreviewPlayer({
     if (performanceDeck === "B" && mode === "pro") {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- A committed performance selects its deck; snapshot refreshes do not reload it.
       setB(song);
-      setMix(1);
+      if (!handoff.current) setMix(1);
     } else {
       setA(song);
-      setMix(0);
+      if (!handoff.current) setMix(0);
     }
   }, [song, performanceId, performanceDeck, mode]);
   useEffect(() => {
@@ -379,6 +402,7 @@ export function PreviewPlayer({
     celebration,
   ]);
   const crossfade = () => {
+    if (performanceId || transitionLock.current) return;
     if (ramp.current) return;
     const start = effectiveMix;
     const end = start < 0.5 ? 1 : 0;
@@ -389,7 +413,7 @@ export function PreviewPlayer({
     const began = Date.now();
     setRamping(true);
     ramp.current = setInterval(() => {
-      const fraction = Math.min((Date.now() - began) / 4000, 1);
+      const fraction = Math.min((Date.now() - began) / (fadeSeconds * 1000), 1);
       setMix(start + (end - start) * fraction);
       if (fraction === 1) {
         clearInterval(ramp.current!);
@@ -399,7 +423,7 @@ export function PreviewPlayer({
     }, 40);
   };
   useEffect(() => {
-    if (!autoMix || ramping || mode !== "pro") return;
+    if (!autoMix || ramping || performanceId || mode !== "pro") return;
     const active = effectiveMix < 0.5 ? deckA : deckB;
     const incoming = effectiveMix < 0.5 ? deckB : deckA;
     if (
@@ -412,7 +436,118 @@ export function PreviewPlayer({
       // eslint-disable-next-line react-hooks/set-state-in-effect -- The media clock triggers an optional automatic transition.
       crossfade();
   });
+  const passTurn = async (turn: PreviewTurn, letter: "A" | "B") => {
+    if (
+      !onHandoff ||
+      !continuous ||
+      !performanceId ||
+      transitionLock.current ||
+      busy
+    )
+      return;
+    const incoming = letter === "A" ? deckA : deckB;
+    const selectedSong = letter === "A" ? a : b;
+    if (
+      !incoming.ready ||
+      incoming.error ||
+      prepared[letter] !== turn.id ||
+      selectedSong?.id !== turn.song?.id ||
+      letter === performanceDeck
+    )
+      return;
+    transitionLock.current = true;
+    handoff.current = { deck: letter };
+    setRamping(true);
+    setFileError("");
+    let committed = false;
+    try {
+      // Commit the new performer before emitting its audio. Failure leaves the old turn intact.
+      await onHandoff(turn, letter);
+      if (!mounted.current) return;
+      committed = true;
+      incoming.getPlayer()?.playVideo();
+      await waitForPlayback(
+        () =>
+          (letter === "A" ? latest.current.deckA : latest.current.deckB)
+            .getPlayer()
+            ?.getPlayerState() === 1,
+      );
+      if (!mounted.current) return;
+      const start = effectiveMix;
+      const end = letter === "A" ? 0 : 1;
+      // eslint-disable-next-line react-hooks/purity -- Timestamp is read after the user's async handoff action, never during render.
+      const began = Date.now();
+      ramp.current = setInterval(() => {
+        const fraction = Math.min(
+          (Date.now() - began) / (fadeSeconds * 1000),
+          1,
+        );
+        setMix(start + (end - start) * fraction);
+        if (fraction === 1) {
+          clearInterval(ramp.current!);
+          ramp.current = null;
+          (letter === "A"
+            ? latest.current.deckB
+            : latest.current.deckA
+          ).pause();
+          transitionLock.current = false;
+          handoff.current = null;
+          setRamping(false);
+        }
+      }, 40);
+    } catch (e) {
+      if (!mounted.current) return;
+      if (committed) {
+        latest.current.deckA.pause();
+        latest.current.deckB.pause();
+        setMix(letter === "A" ? 0 : 1);
+      }
+      handoff.current = null;
+      transitionLock.current = false;
+      setRamping(false);
+      setFileError(
+        (e as Error).message ||
+          (committed
+            ? "El nuevo turno está preparado. Iniciá la reproducción manualmente."
+            : "No se pudo cambiar de turno. La actuación actual se conserva."),
+      );
+    }
+  };
+  const openSource = (letter: "A" | "B", files = false) => {
+    if (ramping) return;
+    if (performanceId && performanceDeck === letter) {
+      setFileError(
+        "Este deck pertenece a la actuación actual. Finalizá el turno o prepará la próxima canción en el otro deck.",
+      );
+      return;
+    }
+    const deck = letter === "A" ? deckA : deckB;
+    if (
+      deck.playing &&
+      !window.confirm(
+        `El deck ${letter} está reproduciendo. ¿Querés elegir otra canción?`,
+      )
+    )
+      return;
+    (files ? setFilesFor : setSource)(letter);
+  };
   const choose = (picked: PreviewSong) => {
+    if (!source || ramping) return;
+    const deck = source === "A" ? deckA : deckB;
+    if (performanceId && performanceDeck === source) {
+      setSource(null);
+      setFileError(
+        "El deck está reservado por la actuación actual. Usá el otro deck.",
+      );
+      return;
+    }
+    if (
+      deck.playing &&
+      !window.confirm(
+        "Reemplazar esta canción cambia el audio del turno actual. ¿Continuar?",
+      )
+    )
+      return;
     (source === "B" ? setB : setA)(picked);
     setSource(null);
   };
@@ -453,7 +588,37 @@ export function PreviewPlayer({
       );
   };
   return (
-    <div className="trial-stack">
+    <div className={`trial-stack ${mode === "pro" ? "dj-console" : ""}`}>
+      {mode === "pro" && (
+        <div className="dj-console-heading">
+          <div>
+            <span className="trial-eyebrow">
+              LSF PRODUCCIONES · CONTROL DE EMISIÓN
+            </span>
+            <h2>Karaokey Pro</h2>
+          </div>
+          <span className="trial-status">
+            <Radio size={14} />{" "}
+            {external ? "Salida pública" : "Salida en este equipo"}
+          </span>
+          {onHandoff && (
+            <label>
+              Funcionamiento
+              <select
+                aria-label="Funcionamiento DJ"
+                disabled={ramping}
+                value={continuous ? "dj" : "party"}
+                onChange={(e) => setContinuous(e.target.value === "dj")}
+              >
+                <option value="party">Fiesta · celebrar entre turnos</option>
+                <option value="dj">
+                  DJ continuo · transición entre turnos
+                </option>
+              </select>
+            </label>
+          )}
+        </div>
+      )}
       {fileError && <Notice error>{fileError}</Notice>}
       <div ref={row} className={full ? "trial trial-fullscreen" : ""}>
         <PerformanceBanner
@@ -486,9 +651,119 @@ export function PreviewPlayer({
               onVolume={setVolA}
               audible={effectiveMix < 1 && volA > 0}
               ios={mobileIOS}
-              onSearch={() => setSource("A")}
-              onFiles={() => setFilesFor("A")}
+              onSearch={() => openSource("A")}
+              onFiles={() => openSource("A", true)}
+              locked={ramping}
             />
+            {mode === "pro" && (
+              <div className="trial-mixer">
+                <div className="trial-section-heading">
+                  <h2>Mezcla de salida</h2>
+                  <span className="trial-status active">
+                    {external
+                      ? "Audio en la pantalla del público"
+                      : "Audio en este dispositivo"}
+                  </span>
+                </div>
+                <div className="trial-crossfade">
+                  <span>A</span>
+                  <input
+                    aria-label="Mezcla entre deck A y deck B"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={mix}
+                    disabled={ramping || !!performanceId}
+                    onChange={(e) => setMix(Number(e.target.value))}
+                  />
+                  <span>B</span>
+                </div>
+                <div className="dj-channel-faders">
+                  {(
+                    [
+                      ["A", volA, setVolA],
+                      ["B", volB, setVolB],
+                    ] as const
+                  ).map(([letter, value, setValue]) => (
+                    <label key={letter} data-channel={letter}>
+                      VOLUMEN {letter}
+                      <input
+                        aria-label={`Fader de volumen ${letter}`}
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={value}
+                        disabled={
+                          mobileIOS &&
+                          (letter === "A" ? a : b)?.kind !== "local"
+                        }
+                        onChange={(e) => setValue(Number(e.target.value))}
+                      />
+                      <output>{value}%</output>
+                    </label>
+                  ))}
+                </div>
+                <div className="trial-inline">
+                  <button
+                    className="trial-button secondary"
+                    disabled={
+                      ramping ||
+                      !!performanceId ||
+                      !(effectiveMix < 0.5 ? deckB.ready : deckA.ready)
+                    }
+                    onClick={crossfade}
+                  >
+                    {ramping
+                      ? "Cambiando de turno…"
+                      : `Transición libre · ${fadeSeconds} segundos`}
+                  </button>
+                  <label style={{ flexDirection: "row", alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      disabled={!!performanceId || ramping}
+                      checked={autoMix}
+                      onChange={(e) => setAutoMix(e.target.checked)}
+                    />{" "}
+                    Mezcla libre automática (sin turno)
+                  </label>
+                </div>
+                <label>
+                  Duración de transición
+                  <select
+                    aria-label="Duración de transición"
+                    value={fadeSeconds}
+                    disabled={ramping}
+                    onChange={(e) => setFadeSeconds(Number(e.target.value))}
+                  >
+                    {[2, 4, 8].map((s) => (
+                      <option value={s} key={s}>
+                        {s} segundos
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {performanceId && (
+                  <p className="trial-muted">
+                    Hay un turno identificado. Usá «Pasar al aire» en la cola
+                    para que audio, nombre y aplausos cambien juntos. La mezcla
+                    libre queda protegida.
+                  </p>
+                )}
+                <p className="trial-muted" style={{ fontSize: ".8rem" }}>
+                  Preparado: cargado y en pausa. Reproduciendo: avanza sin salir
+                  al público. Al aire: reproduce con volumen en la mezcla.
+                </p>
+                {mobileIOS && (
+                  <Notice>
+                    En iPhone/iPad, la mezcla de volumen entre videos de YouTube
+                    puede no estar disponible. Probá el mezclador en una
+                    computadora.
+                  </Notice>
+                )}
+              </div>
+            )}
             {mode === "pro" && (
               <DeckCard
                 letter="B"
@@ -499,14 +774,21 @@ export function PreviewPlayer({
                 onVolume={setVolB}
                 audible={effectiveMix > 0 && volB > 0}
                 ios={mobileIOS}
-                onSearch={() => setSource("B")}
-                onFiles={() => setFilesFor("B")}
+                onSearch={() => openSource("B")}
+                onFiles={() => openSource("B", true)}
+                locked={ramping}
               />
             )}
           </div>
         )}
         {!full && (
           <div className="trial-player-tools">
+            <button
+              className="trial-button secondary"
+              onClick={() => setPreflight(true)}
+            >
+              Preparar equipo
+            </button>
             <button
               className="trial-button secondary"
               onClick={() => void fullscreen()}
@@ -598,11 +880,18 @@ export function PreviewPlayer({
                           disabled={
                             busy ||
                             deck.playing ||
-                            (loaded && !!performanceId) ||
+                            ramping ||
+                            (loaded &&
+                              !!performanceId &&
+                              (!continuous || !onHandoff || !deck.ready)) ||
                             (letter === performanceDeck && !!performanceId)
                           }
                           onClick={() => {
                             if (loaded) {
+                              if (performanceId) {
+                                void passTurn(t, letter);
+                                return;
+                              }
                               onStart(t, letter);
                               return;
                             }
@@ -616,7 +905,9 @@ export function PreviewPlayer({
                         >
                           {loaded
                             ? performanceId
-                              ? `Preparado en ${letter}`
+                              ? continuous && onHandoff
+                                ? `Pasar ${t.singers} al aire · ${letter}`
+                                : `Preparado en ${letter}`
                               : `Iniciar en ${letter}`
                             : `Preparar en ${letter}`}
                         </button>
@@ -628,66 +919,49 @@ export function PreviewPlayer({
             ))}
           {performanceId && (
             <p className="trial-muted">
-              Finalizá o devolvé la actuación actual antes de iniciar otro
-              turno.
+              {continuous
+                ? "Prepará el próximo turno en el otro deck. Pasar al aire cierra los aplausos anteriores y activa al nuevo cantante antes de la transición."
+                : "Finalizá o devolvé la actuación actual antes de iniciar otro turno."}
             </p>
           )}
         </section>
       )}
-      {mode === "pro" && (
-        <div className="trial-mixer">
-          <div className="trial-section-heading">
-            <h2>Mezcla de salida</h2>
-            <span className="trial-status active">
-              {external
-                ? "Audio en la pantalla del público"
-                : "Audio en este dispositivo"}
-            </span>
-          </div>
-          <div className="trial-crossfade">
-            <span>A</span>
-            <input
-              aria-label="Mezcla entre deck A y deck B"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={mix}
-              disabled={ramping}
-              onChange={(e) => setMix(Number(e.target.value))}
-            />
-            <span>B</span>
-          </div>
-          <div className="trial-inline">
+      {preflight && (
+        <Modal title="Antes de empezar" onClose={() => setPreflight(false)}>
+          <div className="trial-stack">
+            <p>
+              Hacé esta prueba en el equipo y los parlantes del evento, con
+              volumen bajo.
+            </p>
+            <p>
+              <strong>Salida actual:</strong>{" "}
+              {external ? "Pantalla del público conectada" : "Este dispositivo"}
+            </p>
+            <ol>
+              <li>Elegí un video y comprobá Play y Pausa.</li>
+              <li>
+                Confirmá que el sonido salga una sola vez y por los parlantes
+                correctos.
+              </li>
+              <li>Si usás una pantalla externa, abrila y activá su audio.</li>
+              <li>
+                Escaneá el QR desde un celular para comprobar los pedidos y
+                aplausos.
+              </li>
+            </ol>
+            <p className="trial-muted">
+              Esta guía no certifica que el audio físico funcione: escuchalo
+              antes de comenzar. En iPhone/iPad el volumen de YouTube puede
+              depender de los botones del dispositivo.
+            </p>
             <button
-              className="trial-button secondary"
-              disabled={
-                ramping || !(effectiveMix < 0.5 ? deckB.ready : deckA.ready)
-              }
-              onClick={crossfade}
+              className="trial-button"
+              onClick={() => setPreflight(false)}
             >
-              {ramping ? "Mezclando…" : "Transición suave · 4 segundos"}
+              Volver a los controles
             </button>
-            <label style={{ flexDirection: "row", alignItems: "center" }}>
-              <input
-                type="checkbox"
-                checked={autoMix}
-                onChange={(e) => setAutoMix(e.target.checked)}
-              />{" "}
-              Mezclar al terminar la canción
-            </label>
           </div>
-          <p className="trial-muted" style={{ fontSize: ".8rem" }}>
-            Preparado: cargado y en pausa. Reproduciendo: avanza sin salir al
-            público. Al aire: reproduce con volumen en la mezcla.
-          </p>
-          {mobileIOS && (
-            <Notice>
-              En iPhone/iPad, la mezcla de volumen entre videos de YouTube puede
-              no estar disponible. Probá el mezclador en una computadora.
-            </Notice>
-          )}
-        </div>
+        </Modal>
       )}
       {source && (
         <SongBrowser
@@ -727,6 +1001,15 @@ export function PreviewPlayer({
                   <button
                     className="trial-button secondary small"
                     onClick={() => {
+                      if (
+                        ramping ||
+                        (performanceId && performanceDeck === filesFor)
+                      ) {
+                        setFileError(
+                          "No se puede reemplazar el audio de un turno en curso.",
+                        );
+                        return;
+                      }
                       (filesFor === "B" ? setB : setA)(file);
                       setFilesFor(null);
                     }}
@@ -754,6 +1037,7 @@ function DeckCard({
   ios,
   onSearch,
   onFiles,
+  locked = false,
 }: {
   letter: "A" | "B";
   mode: "simple" | "pro";
@@ -765,6 +1049,7 @@ function DeckCard({
   ios: boolean;
   onSearch: () => void;
   onFiles: () => void;
+  locked?: boolean;
 }) {
   const [cue, setCue] = useState(0);
   const [pitch, setPitch] = useState(0);
@@ -790,6 +1075,7 @@ function DeckCard({
   return (
     <section
       className="trial-deck"
+      data-deck={letter}
       aria-label={mode === "simple" ? "Reproductor" : `Deck ${letter}`}
     >
       <div className="trial-deck-bar">
@@ -835,6 +1121,15 @@ function DeckCard({
         </div>
       )}
       <div className="trial-transport">
+        {mode === "pro" && (
+          <div className="dj-time-display">
+            <span>RESTANTE</span>
+            <strong>
+              −{timeLabel(Math.max(0, deck.duration - deck.time))}
+            </strong>
+            <small>CUE {timeLabel(cue)}</small>
+          </div>
+        )}
         <div className="trial-seek">
           <span>{timeLabel(deck.time)}</span>
           <input
@@ -844,7 +1139,7 @@ function DeckCard({
             max={Math.max(deck.duration, 1)}
             step="0.1"
             value={deck.time}
-            disabled={!deck.ready}
+            disabled={!deck.ready || locked}
             onChange={(e) => deck.seek(Number(e.target.value))}
           />
           <span>{timeLabel(deck.duration)}</span>
@@ -853,11 +1148,56 @@ function DeckCard({
           <button
             className="trial-play"
             aria-label={`${deck.playing ? "Pausar" : "Reproducir"} ${letter}`}
-            disabled={!deck.ready}
+            disabled={!deck.ready || locked}
             onClick={deck.toggle}
           >
             {deck.playing ? <Pause /> : <Play />}
           </button>
+          {mode === "pro" && (
+            <>
+              <button
+                className="dj-pad cue"
+                disabled={!deck.ready || locked}
+                aria-label={`Volver al CUE del deck ${letter}`}
+                onClick={() => {
+                  deck.pause();
+                  deck.seek(cue);
+                }}
+              >
+                <SkipBack />
+                <span>CUE</span>
+              </button>
+              <button
+                className="dj-pad"
+                disabled={!deck.ready || locked}
+                aria-label={`Marcar CUE del deck ${letter}`}
+                onClick={() => setCue(deck.time)}
+              >
+                <Flag />
+                <span>SET</span>
+              </button>
+              <button
+                className="dj-pad stop"
+                disabled={!deck.ready || locked}
+                aria-label={`Detener deck ${letter}`}
+                onClick={() => {
+                  if (
+                    deck.playing &&
+                    audible &&
+                    !window.confirm(
+                      `El deck ${letter} está al aire. ¿Detenerlo?`,
+                    )
+                  )
+                    return;
+                  deck.pause();
+                  deck.seek(0);
+                }}
+              >
+                <Square />
+                <span>STOP</span>
+              </button>
+            </>
+          )}
           {ios && song?.kind !== "local" ? (
             <span className="trial-muted" style={{ fontSize: ".85rem" }}>
               Volumen: usá los botones del celular.
@@ -897,40 +1237,42 @@ function DeckCard({
           <Upload /> Mis archivos
         </button>
       </div>
-      <details className="trial-advanced">
+      {(mode === "simple" || song?.kind === "local") && <details className="trial-advanced">
         <summary>
           {mode === "simple" ? "Más opciones" : "Cue y ajustes"}
         </summary>
         <div className="trial-advanced-content">
-          <div className="trial-inline">
-            <button
-              className="trial-button secondary small"
-              disabled={!deck.ready}
-              onClick={() => {
-                deck.seek(cue);
-                deck.pause();
-              }}
-            >
-              <SkipBack /> Volver a {timeLabel(cue)}
-            </button>
-            <button
-              className="trial-button secondary small"
-              disabled={!deck.ready}
-              onClick={() => setCue(deck.time)}
-            >
-              <Flag /> Marcar inicio
-            </button>
-            <button
-              className="trial-button secondary small"
-              disabled={!deck.ready}
-              onClick={() => {
-                deck.pause();
-                deck.seek(0);
-              }}
-            >
-              <Square /> Detener
-            </button>
-          </div>
+          {mode === "simple" && (
+            <div className="trial-inline">
+              <button
+                className="trial-button secondary small"
+                disabled={!deck.ready || locked}
+                onClick={() => {
+                  deck.seek(cue);
+                  deck.pause();
+                }}
+              >
+                <SkipBack /> Volver a {timeLabel(cue)}
+              </button>
+              <button
+                className="trial-button secondary small"
+                disabled={!deck.ready || locked}
+                onClick={() => setCue(deck.time)}
+              >
+                <Flag /> Marcar inicio
+              </button>
+              <button
+                className="trial-button secondary small"
+                disabled={!deck.ready || locked}
+                onClick={() => {
+                  deck.pause();
+                  deck.seek(0);
+                }}
+              >
+                <Square /> Detener
+              </button>
+            </div>
+          )}
           {song?.kind === "local" && (
             <>
               <label>
@@ -974,7 +1316,7 @@ function DeckCard({
             </>
           )}
         </div>
-      </details>
+      </details>}
     </section>
   );
 }

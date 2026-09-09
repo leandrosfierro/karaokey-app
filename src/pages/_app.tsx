@@ -2,6 +2,7 @@ import type { AppProps } from "next/app";
 import { Inter } from "next/font/google";
 import "../styles/globals.css";
 import "../styles/preview.css";
+import "../styles/studio-refinement.css";
 import { useRouter } from 'next/router';
 import { ToastProvider } from "../components/Toast";
 import { AuthProvider } from "../lib/auth";

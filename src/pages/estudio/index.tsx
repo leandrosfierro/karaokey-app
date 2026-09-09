@@ -11,6 +11,8 @@ import {
   Shuffle,
   Play,
   CircleHelp,
+  MoreHorizontal,
+  Check,
 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { useAuth } from "../../lib/auth";
@@ -31,6 +33,7 @@ import {
   SongRow,
 } from "../../components/preview/Shared";
 import { PreviewPlayer } from "../../components/preview/Player";
+import { QueueFilters } from "../../components/preview/QueueFilters";
 import type { PreviewSong, PreviewTurn } from "../../lib/preview/model";
 import {
   studioSearch,
@@ -88,6 +91,9 @@ export default function Studio() {
     applause: number;
   } | null>(null);
   const [filter, setFilter] = useState("");
+  const [libraryFilter, setLibraryFilter] = useState<
+    "all" | "ready" | "pending"
+  >("all");
   const lock = useRef(false);
   const sequence = useRef(0);
   const fetching = useRef(false);
@@ -121,43 +127,44 @@ export default function Studio() {
     fetching.current = true;
     try {
       const seq = ++sequence.current;
-      const [people, songs, queue, performance, host, history] = await Promise.all([
-        supabase
-          .from("karaokey_participantes")
-          .select("*")
-          .eq("user_id", uid)
-          .order("created_at"),
-        supabase
-          .from("karaokey_canciones")
-          .select("*")
-          .eq("user_id", uid)
-          .order("created_at"),
-        supabase
-          .from("karaokey_temas_publico")
-          .select("*")
-          .eq("user_id", uid)
-          .order("approved_at"),
-        supabase
-          .from("karaokey_performances")
-          .select("*")
-          .eq("user_id", uid)
-          .eq("managed", true)
-          .is("ended_at", null)
-          .maybeSingle(),
-        supabase
-          .from("karaokey_hosts")
-          .select("*")
-          .eq("user_id", uid)
-          .maybeSingle(),
-        supabase
-          .from("karaokey_performances")
-          .select("*")
-          .eq("user_id", uid)
-          .eq("managed", true)
-          .not("ended_at", "is", null)
-          .order("ended_at", { ascending: false })
-          .limit(50),
-      ]);
+      const [people, songs, queue, performance, host, history] =
+        await Promise.all([
+          supabase
+            .from("karaokey_participantes")
+            .select("*")
+            .eq("user_id", uid)
+            .order("created_at"),
+          supabase
+            .from("karaokey_canciones")
+            .select("*")
+            .eq("user_id", uid)
+            .order("created_at"),
+          supabase
+            .from("karaokey_temas_publico")
+            .select("*")
+            .eq("user_id", uid)
+            .order("approved_at"),
+          supabase
+            .from("karaokey_performances")
+            .select("*")
+            .eq("user_id", uid)
+            .eq("managed", true)
+            .is("ended_at", null)
+            .maybeSingle(),
+          supabase
+            .from("karaokey_hosts")
+            .select("*")
+            .eq("user_id", uid)
+            .maybeSingle(),
+          supabase
+            .from("karaokey_performances")
+            .select("*")
+            .eq("user_id", uid)
+            .eq("managed", true)
+            .not("ended_at", "is", null)
+            .order("ended_at", { ascending: false })
+            .limit(50),
+        ]);
       const failure = [people, songs, queue, performance, host, history].find(
         (r) => r.error,
       )?.error;
@@ -231,7 +238,8 @@ export default function Studio() {
   const songs = data.songs.map(studioSong).filter((s): s is PreviewSong => !!s);
   const turns = studioTurns(data.queue, data.performance, data.applause);
   for (const performed of data.history) {
-    if (performed.turn_id && data.queue.some((q) => q.id === performed.turn_id)) continue;
+    if (performed.turn_id && data.queue.some((q) => q.id === performed.turn_id))
+      continue;
     const entry = studioTurns([], performed, 0)[0];
     if (entry) turns.push({ ...entry, status: "done" });
   }
@@ -279,6 +287,57 @@ export default function Studio() {
       setSection("stage");
       setSummary(null);
     });
+  const handoff = async (turn: PreviewTurn, deck: "A" | "B") => {
+    if (lock.current || !data.performance || !uid)
+      throw new Error("Esperá a que termine la operación actual.");
+    const previous = data.performance;
+    lock.current = true;
+    sequence.current++;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await supabase.rpc("rpc_stage_handoff", {
+        p_from: previous.id,
+        p_turn: turn.id,
+      });
+      if (result.error)
+        throw new Error(
+          result.error.code === "PGRST202"
+            ? "El cambio continuo requiere la actualización de base de datos de esta versión. Podés usar Fiesta mientras tanto."
+            : result.error.message,
+        );
+      const next = result.data as PerformanceRow;
+      if (!next?.id)
+        throw new Error(
+          "No llegó la confirmación del turno. Actualizá antes de continuar.",
+        );
+      setData((prev) => ({
+        ...prev,
+        performance: next,
+        applause: 0,
+        people: prev.people.map((p) =>
+          previous.participantes.includes(p.nombre)
+            ? { ...p, ya_canto: true }
+            : p,
+        ),
+        queue: prev.queue.map((q) =>
+          q.id === previous.turn_id
+            ? { ...q, status: "done" }
+            : q.id === turn.id
+              ? { ...q, status: "active" }
+              : q,
+        ),
+      }));
+      setActiveDeck(deck);
+      setSummary(null);
+      setMessage(
+        `En escenario: ${next.participantes.join(" & ")}. Los aplausos anteriores quedaron cerrados.`,
+      );
+    } finally {
+      lock.current = false;
+      setBusy(false);
+    }
+  };
   const finish = (returnToQueue = false) =>
     void act(async () => {
       if (!data.performance) return;
@@ -339,35 +398,31 @@ export default function Studio() {
         (!singerOnly && !song)
       )
         throw new Error("Completá la selección de cantante y canción.");
-      const { error } = await supabase
-        .from("karaokey_temas_publico")
-        .insert({
-          user_id: uid,
-          submitted_by: names.join(" & "),
-          participantes: names,
-          titulo: singerOnly ? "" : song!.title,
-          artista: singerOnly ? null : song!.channel,
-          youtube_video_id: singerOnly ? null : song!.id,
-          youtube_thumbnail: singerOnly ? null : song!.thumbnail,
-          device_id: "host",
-          status: "pending",
-          approved_at: new Date().toISOString(),
-        });
+      const { error } = await supabase.from("karaokey_temas_publico").insert({
+        user_id: uid,
+        submitted_by: names.join(" & "),
+        participantes: names,
+        titulo: singerOnly ? "" : song!.title,
+        artista: singerOnly ? null : song!.channel,
+        youtube_video_id: singerOnly ? null : song!.id,
+        youtube_thumbnail: singerOnly ? null : song!.thumbnail,
+        device_id: "host",
+        status: "pending",
+        approved_at: new Date().toISOString(),
+      });
       if (error) throw error;
       setMessage("Turno aprobado y agregado al final de la cola.");
       setSection("queue");
     });
   const participation = () =>
     void act(async () => {
-      const { error } = await supabase
-        .from("karaokey_hosts")
-        .upsert(
-          {
-            user_id: uid,
-            participativo_enabled: !data.host?.participativo_enabled,
-          },
-          { onConflict: "user_id" },
-        );
+      const { error } = await supabase.from("karaokey_hosts").upsert(
+        {
+          user_id: uid,
+          participativo_enabled: !data.host?.participativo_enabled,
+        },
+        { onConflict: "user_id" },
+      );
       if (error) throw error;
     });
   const regenerate = () => {
@@ -417,10 +472,6 @@ export default function Studio() {
       <Head>
         <title>Karaokey · Tu fiesta, tu escenario</title>
       </Head>
-      <div className="trial-banner">
-        Tus listas se guardan en tu cuenta ·{" "}
-        <Link href="/clasico">Interfaz clásica y herramientas anteriores</Link>
-      </div>
       <header className="trial-header">
         <Brand />
         <div
@@ -453,9 +504,16 @@ export default function Studio() {
         >
           <CircleHelp />
         </button>
-        <button className="trial-link" onClick={() => void signOut()}>
-          Cerrar sesión
-        </button>
+        <details className="studio-account">
+          <summary aria-label="Cuenta y herramientas">
+            <MoreHorizontal />
+          </summary>
+          <div className="studio-account-menu">
+            <p>Tus listas se guardan en tu cuenta.</p>
+            <Link href="/clasico">Interfaz clásica</Link>
+            <button onClick={() => void signOut()}>Cerrar sesión</button>
+          </div>
+        </details>
       </header>
       <div className="trial-layout">
         <nav className="trial-nav" aria-label="Navegación del estudio">
@@ -495,17 +553,28 @@ export default function Studio() {
                   </p>
                 </div>
               </div>
-              <div className="trial-checklist">
+              <ol
+                className="studio-progress"
+                aria-label="Preparación del turno"
+              >
                 {[
-                  "1. Sumá participantes",
-                  "2. Elegí la versión",
-                  "3. Ir al escenario",
-                ].map((label) => (
-                  <div className="trial-card" key={label}>
+                  {
+                    label: "Cantante",
+                    done:
+                      !!selected && (!duo || (!!second && second !== selected)),
+                  },
+                  {
+                    label: singerOnly ? "Sin canción" : "Canción",
+                    done: singerOnly || !!song,
+                  },
+                  { label: "Escenario", done: !!current },
+                ].map(({ label, done }, i) => (
+                  <li data-done={done} key={label}>
+                    <span>{done ? <Check size={15} /> : i + 1}</span>
                     {label}
-                  </div>
+                  </li>
                 ))}
-              </div>
+              </ol>
               <div className="trial-card trial-stack">
                 <h2>¿Quién canta?</h2>
                 <form
@@ -515,8 +584,16 @@ export default function Studio() {
                     void act(async () => {
                       const value = person.trim();
                       if (!value) return;
-                      if (data.people.some((p) => p.nombre.trim().toLocaleLowerCase() === value.toLocaleLowerCase())) {
-                        throw new Error("Ese nombre ya está en la lista. Si son dos personas distintas, agregá un apellido o apodo.");
+                      if (
+                        data.people.some(
+                          (p) =>
+                            p.nombre.trim().toLocaleLowerCase() ===
+                            value.toLocaleLowerCase(),
+                        )
+                      ) {
+                        throw new Error(
+                          "Ese nombre ya está en la lista. Si son dos personas distintas, agregá un apellido o apodo.",
+                        );
                       }
                       const { error } = await supabase
                         .from("karaokey_participantes")
@@ -623,7 +700,7 @@ export default function Studio() {
                     onClick={draw}
                   >
                     <Shuffle />
-                    Sortear selección
+                    Elegir al azar
                   </button>
                   <button
                     className="trial-button"
@@ -637,7 +714,9 @@ export default function Studio() {
                     onClick={() => start()}
                   >
                     <Play />
-                    Ir al escenario
+                    {selected
+                      ? `Llevar a ${data.people.find((p) => p.id === selected)?.nombre || "cantante"}${duo ? " y su dúo" : ""} al escenario`
+                      : "Ir al escenario"}
                   </button>
                   <button
                     className="trial-button secondary"
@@ -652,6 +731,17 @@ export default function Studio() {
                     Sumar a próximos turnos
                   </button>
                 </div>
+                {!current && (
+                  <p className="trial-muted" role="status">
+                    {!selected
+                      ? "Elegí quién canta para continuar."
+                      : duo && (!second || second === selected)
+                        ? "Elegí a la segunda persona del dúo."
+                        : !singerOnly && !song
+                          ? "Falta elegir una versión de la canción."
+                          : "Todo listo. Podés comenzar ahora o reservar un turno."}
+                  </p>
+                )}
                 {current && (
                   <Notice>
                     Hay una actuación abierta. Finalizala desde Escenario para
@@ -766,23 +856,11 @@ export default function Studio() {
                 Revisá los pedidos y aprobá las versiones antes de llevarlas al
                 escenario.
               </p>
-              <div className="trial-tabs">
-                {[
-                  ["pending", "Aprobados"],
-                  ["review", "Por aprobar"],
-                  ["active", "En escenario"],
-                  ["done", "Historial"],
-                  ["cancelled", "Retirados"],
-                ].map(([id, label]) => (
-                  <button
-                    key={id}
-                    aria-pressed={queueFilter === id}
-                    onClick={() => setQueueFilter(id)}
-                  >
-                    {label} ({turns.filter((t) => t.status === id).length})
-                  </button>
-                ))}
-              </div>
+              <QueueFilters
+                value={queueFilter}
+                onChange={setQueueFilter}
+                turns={turns}
+              />
               {!turns.some((t) => t.status === queueFilter) && (
                 <Empty title="No hay turnos en esta sección">
                   Los pedidos del público aparecerán en Por aprobar. También
@@ -880,7 +958,48 @@ export default function Studio() {
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               />
+              <div className="trial-tabs" aria-label="Estado de las canciones">
+                {(
+                  [
+                    ["all", "Todas"],
+                    ["ready", "Listas para cantar"],
+                    ["pending", "Elegir versión"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    aria-pressed={libraryFilter === id}
+                    onClick={() => setLibraryFilter(id)}
+                  >
+                    {label} (
+                    {
+                      data.songs.filter(
+                        (s) =>
+                          id === "all" ||
+                          (id === "ready"
+                            ? !!s.youtube_video_id
+                            : !s.youtube_video_id),
+                      ).length
+                    }
+                    )
+                  </button>
+                ))}
+              </div>
+              {libraryFilter !== "ready" &&
+                data.songs.some((s) => !s.youtube_video_id) && (
+                  <Notice>
+                    Tus canciones anteriores siguen guardadas. Elegí una versión
+                    de cada una para dejarlas listas para cantar.
+                  </Notice>
+                )}
               {data.songs
+                .filter(
+                  (s) =>
+                    libraryFilter === "all" ||
+                    (libraryFilter === "ready"
+                      ? !!s.youtube_video_id
+                      : !s.youtube_video_id),
+                )
                 .filter((s) =>
                   (s.titulo + " " + s.artista)
                     .toLowerCase()
@@ -909,9 +1028,8 @@ export default function Studio() {
                       ) : (
                         <div className="trial-card">
                           <strong>{row.titulo}</strong>
-                          <p>
-                            Guardada como texto. Elegí su versión antes de
-                            reproducir.
+                          <p className="trial-muted">
+                            {row.artista || "Versión pendiente"}
                           </p>
                           <button
                             className="trial-button secondary"
@@ -925,13 +1043,17 @@ export default function Studio() {
                           </button>
                         </div>
                       )}
-                      <button
-                        className="trial-link"
-                        disabled={busy}
-                        onClick={() => remove("karaokey_canciones", row.id)}
-                      >
-                        Eliminar {row.titulo}
-                      </button>
+                      <details className="studio-row-menu">
+                        <summary aria-label={`Opciones de ${row.titulo}`}>
+                          <MoreHorizontal size={18} /> Opciones
+                        </summary>
+                        <button
+                          disabled={busy}
+                          onClick={() => remove("karaokey_canciones", row.id)}
+                        >
+                          Eliminar canción
+                        </button>
+                      </details>
                     </div>
                   );
                 })}
@@ -966,6 +1088,7 @@ export default function Studio() {
               songs={songs}
               turns={turns}
               onStart={start}
+              onHandoff={handoff}
               onSave={save}
               onSearch={studioSearch}
               scope={`studio-${uid}`}

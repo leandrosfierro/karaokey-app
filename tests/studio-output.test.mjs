@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {validTransport,mixVolumes} from '../src/lib/studio-output.ts';
+import {validTransport,mixVolumes,waitForPlayback} from '../src/lib/studio-output.ts';
 test('transport ignores stale deck identities and invalid commands',()=>{
   const command={type:'transport',signature:'a|b',deck:'B',action:'seek',value:12};
   assert.equal(validTransport(command,'a|b'),true);
@@ -15,4 +15,8 @@ test('program gain follows crossfader and individual trims',()=>{
   assert.deepEqual(mixVolumes(1,100,50),[0,50]);
   assert.deepEqual(mixVolumes(2,-10,120),[0,100]);
   assert.deepEqual(mixVolumes(NaN,Infinity,100),[0,0]);
+});
+test('handoff waits for real playback and rejects a blocked player',async()=>{
+  await waitForPlayback(()=>true,20);
+  await assert.rejects(waitForPlayback(()=>false,20),/no inició/);
 });
