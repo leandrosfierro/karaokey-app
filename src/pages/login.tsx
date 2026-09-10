@@ -19,7 +19,7 @@ export default function Login() {
     router.query.next.startsWith("/") &&
     !router.query.next.startsWith("//")
       ? router.query.next
-      : "/";
+      : "/acceso";
 
   useEffect(() => {
     if (!loading && user) router.replace(requestedNext);

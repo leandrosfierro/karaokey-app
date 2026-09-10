@@ -63,7 +63,7 @@ const EMPTY: Snapshot = {
 };
 
 export default function Studio() {
-  const { user, loading, modo, setModo, signOut } = useAuth();
+  const { user, loading, modo, setModo, isSuperadmin, signOut } = useAuth();
   const router = useRouter();
   const [data, setData] = useState<Snapshot>(EMPTY);
   const [section, setSection] = useState<Section>("party");
@@ -510,6 +510,7 @@ export default function Studio() {
           </summary>
           <div className="studio-account-menu">
             <p>Tus listas se guardan en tu cuenta.</p>
+            {isSuperadmin && <Link href="/superadmin">Dashboard general</Link>}
             <Link href="/clasico">Interfaz clásica</Link>
             <button onClick={() => void signOut()}>Cerrar sesión</button>
           </div>

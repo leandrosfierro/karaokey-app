@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Head from "next/head";
+import Link from "next/link";
 import { useRouter } from "next/router";
 import {
   Activity,
+  ArrowLeft,
   BarChart3,
   Clock3,
   Headphones,
@@ -187,6 +189,9 @@ export default function Superadmin() {
           <button onClick={() => void refresh()} disabled={refreshing}>
             <RefreshCw className={refreshing ? "spin" : ""} /> Actualizar
           </button>
+          <Link href="/">
+            <ArrowLeft /> Ir a Karaokey
+          </Link>
           <button className="secondary" onClick={() => void signOut()}>
             <LogOut /> Salir
           </button>

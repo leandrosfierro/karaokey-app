@@ -8,6 +8,8 @@ interface AuthContextValue {
     user: User | null;
     session: Session | null;
     loading: boolean;
+    isSuperadmin: boolean;
+    adminLoading: boolean;
     // undefined = never chosen yet (new account, or signed up before email
     // confirmation completed) — callers use this to show the one-time picker,
     // distinct from 'pro' which is the settled default once a choice is made.
@@ -36,6 +38,8 @@ function patchMetadata(session: Session, patch: Record<string, unknown>): Sessio
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
+    const [isSuperadmin, setIsSuperadmin] = useState(false);
+    const [adminCheckedUserId, setAdminCheckedUserId] = useState<string | null>(null);
 
     /* eslint-disable react-hooks/set-state-in-effect -- env var check is a static,
        one-time boot-time fact, not state derived from props/state each render (same
@@ -57,6 +61,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     /* eslint-enable react-hooks/set-state-in-effect */
 
     const user = session?.user ?? null;
+    const userId = user?.id;
+    const adminLoading = Boolean(userId && adminCheckedUserId !== userId);
+
+    /* eslint-disable react-hooks/set-state-in-effect -- the role is server-owned
+       data that must be refreshed whenever the authenticated identity changes. */
+    useEffect(() => {
+        let cancelled = false;
+        if (!userId) {
+            setIsSuperadmin(false);
+            setAdminCheckedUserId(null);
+            return;
+        }
+        supabase.rpc('rpc_is_superadmin').then(({ data, error }) => {
+            if (cancelled) return;
+            setIsSuperadmin(!error && data === true);
+            setAdminCheckedUserId(userId);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [userId]);
+    /* eslint-enable react-hooks/set-state-in-effect */
+
     const rawModo = user?.user_metadata?.modo;
     const modo: Modo | undefined = rawModo === 'simple' || rawModo === 'pro' ? rawModo : undefined;
     const onboardingDone = Boolean(user?.user_metadata?.onboarding_done);
@@ -76,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     return (
-        <AuthContext.Provider value={{ user, session, loading, modo, setModo, onboardingDone, markOnboardingDone, signOut }}>
+        <AuthContext.Provider value={{ user, session, loading, isSuperadmin, adminLoading, modo, setModo, onboardingDone, markOnboardingDone, signOut }}>
             {children}
         </AuthContext.Provider>
     );

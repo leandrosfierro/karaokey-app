@@ -40,6 +40,7 @@
   gap: 8px;
 }
 .superadmin-actions button,
+.superadmin-actions a,
 .superadmin-access-card button {
   min-height: 44px;
   padding: 10px 14px;
@@ -52,8 +53,10 @@
   color: #fff;
   font-weight: 800;
   cursor: pointer;
+  text-decoration: none;
 }
-.superadmin-actions button.secondary {
+.superadmin-actions button.secondary,
+.superadmin-actions a {
   background: #ffffff0b;
 }
 .superadmin-actions svg {
@@ -391,7 +394,8 @@
   .superadmin-kpis {
     grid-template-columns: 1fr;
   }
-  .superadmin-actions button {
+  .superadmin-actions button,
+  .superadmin-actions a {
     flex: 1;
     justify-content: center;
   }
