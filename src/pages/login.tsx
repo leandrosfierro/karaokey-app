@@ -14,29 +14,40 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestedNext =
+    typeof router.query.next === "string" &&
+    router.query.next.startsWith("/") &&
+    !router.query.next.startsWith("//")
+      ? router.query.next
+      : "/";
 
   useEffect(() => {
-    if (!loading && user) router.replace('/');
-  }, [loading, user, router]);
+    if (!loading && user) router.replace(requestedNext);
+  }, [loading, user, router, requestedNext]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
     setSubmitting(false);
     if (signInError) {
       setError(translateAuthError(signInError.message));
       return;
     }
-    router.replace('/');
+    router.replace(requestedNext);
   };
 
   if (loading || user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-white/60">
         <div className="w-10 h-10 border-4 border-white/20 border-t-neon-pink rounded-full animate-spin" />
-        <p className="text-sm font-bold uppercase tracking-widest">Cargando...</p>
+        <p className="text-sm font-bold uppercase tracking-widest">
+          Cargando...
+        </p>
       </div>
     );
   }
@@ -52,7 +63,10 @@ export default function Login() {
         animate={{ scale: 1, opacity: 1 }}
         className="max-w-sm w-full space-y-6"
       >
-        <Link href="/bienvenida" className="inline-flex items-center gap-2 text-white/40 hover:text-white/70 transition-colors text-xs font-bold uppercase tracking-widest">
+        <Link
+          href="/bienvenida"
+          className="inline-flex items-center gap-2 text-white/40 hover:text-white/70 transition-colors text-xs font-bold uppercase tracking-widest"
+        >
           <ArrowLeft size={14} /> Volver
         </Link>
 
@@ -60,14 +74,24 @@ export default function Login() {
           <h1 className="text-3xl font-black italic tracking-tighter text-transparent bg-clip-text bg-linear-to-r from-[#FF3B81] via-[#9D4EDD] to-[#00B7ED]">
             KARAOKEY
           </h1>
-          <p className="text-white/50 text-sm">Iniciá sesión para entrar a tu cuenta</p>
+          <p className="text-white/50 text-sm">
+            Iniciá sesión para entrar a tu cuenta
+          </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="glass-card rounded-3xl p-6 space-y-4 border border-white/5">
+        <form
+          onSubmit={handleSubmit}
+          className="glass-card rounded-3xl p-6 space-y-4 border border-white/5"
+        >
           <div className="space-y-1">
-            <label className="text-xs font-bold uppercase tracking-widest text-white/50">Email</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-white/50">
+              Email
+            </label>
             <div className="relative">
-              <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+              <Mail
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30"
+              />
               <input
                 type="email"
                 required
@@ -81,9 +105,14 @@ export default function Login() {
           </div>
 
           <div className="space-y-1">
-            <label className="text-xs font-bold uppercase tracking-widest text-white/50">Contraseña</label>
+            <label className="text-xs font-bold uppercase tracking-widest text-white/50">
+              Contraseña
+            </label>
             <div className="relative">
-              <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+              <Lock
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30"
+              />
               <input
                 type="password"
                 required
@@ -97,7 +126,9 @@ export default function Login() {
           </div>
 
           {error && (
-            <p className="text-xs text-[#FF3B81] bg-[#FF3B81]/10 border border-[#FF3B81]/20 rounded-xl p-3">{error}</p>
+            <p className="text-xs text-[#FF3B81] bg-[#FF3B81]/10 border border-[#FF3B81]/20 rounded-xl p-3">
+              {error}
+            </p>
           )}
 
           <button
@@ -115,8 +146,11 @@ export default function Login() {
         </form>
 
         <p className="text-center text-sm text-white/40">
-          ¿No tenés cuenta?{' '}
-          <Link href="/registro" className="text-neon-blue hover:underline font-bold">
+          ¿No tenés cuenta?{" "}
+          <Link
+            href="/registro"
+            className="text-neon-blue hover:underline font-bold"
+          >
             Creá una
           </Link>
         </p>
