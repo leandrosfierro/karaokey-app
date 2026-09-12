@@ -246,9 +246,13 @@ export default function Studio() {
   const current = turns.find((t) => t.status === "active") || null;
   const save = async (values: PreviewSong[]) => {
     if (!uid) throw new Error("Iniciá sesión.");
-    await saveStudioSongs(uid, values);
+    const saved = await saveStudioSongs(uid, values);
     await refresh();
-    setMessage("Versiones guardadas en tu cuenta.");
+    setMessage(
+      saved
+        ? `${saved} versiones nuevas guardadas en tu cuenta.`
+        : "Todas esas versiones ya estaban en tu biblioteca.",
+    );
   };
   const start = (turn?: PreviewTurn, deck: "A" | "B" = "A") =>
     void act(async () => {

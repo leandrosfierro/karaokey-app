@@ -11,7 +11,7 @@ import {
 import type { PreviewSong } from "../../lib/preview/model";
 export type SongSearch = (
   query: string,
-  playlist?: boolean,
+  kind?: "search" | "playlist" | "channel",
 ) => Promise<PreviewSong[]>;
 
 export async function previewApi<T = any>(
@@ -218,7 +218,7 @@ export function SongBrowser({
         .filter(Boolean);
       if (lines.length > 20)
         throw new Error(
-          "Pegá hasta 20 enlaces individuales o una playlist por vez.",
+          "Pegá hasta 20 enlaces de videos, playlists o canales por vez.",
         );
       for (const url of lines) {
         if (
@@ -227,16 +227,21 @@ export function SongBrowser({
           throw new Error(
             "Usá enlaces de YouTube: así conservamos la versión exacta.",
           );
-        const isPlaylist = /[?&]list=/.test(url) && !/[?&]v=/.test(url);
+        const kind =
+          /youtube\.com\/(?:@[^/?#]+|channel\/UC[\w-]+)/i.test(url)
+            ? "channel"
+            : /[?&]list=/.test(url) && !/[?&]v=/.test(url)
+              ? "playlist"
+              : "search";
         const data = onSearch
-          ? { results: await onSearch(url, isPlaylist) }
+          ? { results: await onSearch(url, kind) }
           : await previewApi<{ results: PreviewSong[] }>(
-              `search?q=${encodeURIComponent(url)}&kind=${isPlaylist ? "playlist" : "search"}`,
+              `search?q=${encodeURIComponent(url)}&kind=${kind}`,
             );
         found.push(...data.results);
       }
       setResults(
-        [...new Map(found.map((s) => [s.id, s])).values()].slice(0, 100),
+        [...new Map(found.map((s) => [s.id, s])).values()],
       );
     } catch (e) {
       setError((e as Error).message);
@@ -294,12 +299,12 @@ export function SongBrowser({
       {tab === "import" ? (
         <div className="trial-stack">
           <label>
-            Enlaces de videos o de una playlist pública
+            Enlaces de videos, playlists o canales públicos
             <textarea
               value={importText}
               onChange={(e) => setImportText(e.target.value)}
               rows={4}
-              placeholder="Un enlace por línea. Hasta 100 videos por playlist."
+              placeholder="Un enlace por línea. Podés pegar varios canales completos."
             />
           </label>
           <button
@@ -346,7 +351,7 @@ export function SongBrowser({
       )}
       {error && <Notice error>{error}</Notice>}
       <div className="trial-results">
-        {visible.map((song) => (
+        {visible.slice(0, 100).map((song) => (
           <SongRow
             key={song.id}
             song={song}
@@ -360,6 +365,12 @@ export function SongBrowser({
             }
           />
         ))}
+        {visible.length > 100 && (
+          <Notice>
+            Mostramos 100 de {visible.length} versiones para mantener la vista
+            fluida. Al guardar se incorporarán todas.
+          </Notice>
+        )}
         {!visible.length && !busy && !error && (
           <Empty
             title={

@@ -67,10 +67,10 @@ export function studioTurns(
 
 export async function studioSearch(
   query: string,
-  playlist = false,
+  kind: "search" | "playlist" | "channel" = "search",
 ): Promise<PreviewSong[]> {
   const id = youtubeId(query.trim());
-  if (id && !playlist) {
+  if (id && kind === "search") {
     // An explicit URL retains the chosen version even when search quota is exhausted.
     return [
       {
@@ -82,9 +82,11 @@ export async function studioSearch(
     ];
   }
   const response = await fetch(
-    playlist
+    kind === "playlist"
       ? `/api/playlist-videos?url=${encodeURIComponent(query)}`
-      : `/api/youtube?q=${encodeURIComponent(query)}`,
+      : kind === "channel"
+        ? `/api/channel-videos?q=${encodeURIComponent(query)}`
+        : `/api/youtube?q=${encodeURIComponent(query)}`,
     { cache: "no-store" },
   );
   const data = await response.json();
@@ -137,17 +139,19 @@ export async function saveStudioSongs(userId: string, songs: PreviewSong[]) {
     (s) =>
       s.kind !== "local" && /^[\w-]{11}$/.test(s.id) && !existing.has(s.id),
   );
-  if (!rows.length) return;
-  const result = await supabase
-    .from("karaokey_canciones")
-    .insert(
-      rows.map((s) => ({
-        user_id: userId,
-        titulo: s.title,
-        artista: s.channel || null,
-        youtube_video_id: s.id,
-        youtube_thumbnail: s.thumbnail,
-      })),
-    );
-  if (result.error) throw result.error;
+  if (!rows.length) return 0;
+  const payload = rows.map((s) => ({
+    user_id: userId,
+    titulo: s.title,
+    artista: s.channel || null,
+    youtube_video_id: s.id,
+    youtube_thumbnail: s.thumbnail,
+  }));
+  for (let start = 0; start < payload.length; start += 200) {
+    const result = await supabase
+      .from("karaokey_canciones")
+      .insert(payload.slice(start, start + 200));
+    if (result.error) throw result.error;
+  }
+  return payload.length;
 }

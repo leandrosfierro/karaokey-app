@@ -1,48 +1,149 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiRequest, NextApiResponse } from "next";
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const MAX_PAGES = 40;
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-    if (req.method !== 'GET') {
-        return res.status(405).json({ message: 'Method not allowed' });
-    }
+type YouTubeError = {
+  error?: { message?: string; errors?: { reason?: string }[] };
+};
 
-    const { q } = req.query;
+function channelReference(value: string) {
+  const input = value.trim();
+  const channelId = input.match(/youtube\.com\/channel\/(UC[\w-]+)/i)?.[1];
+  if (channelId) return { key: "id", value: channelId } as const;
+  const handle =
+    input.match(/youtube\.com\/@([^/?#]+)/i)?.[1] ||
+    input.match(/^@([^/?#]+)$/)?.[1];
+  if (handle) return { key: "forHandle", value: `@${handle}` } as const;
+  if (/^UC[\w-]{20,}$/.test(input))
+    return { key: "id", value: input } as const;
+  return null;
+}
 
-    if (!q || !YOUTUBE_API_KEY) {
-        return res.status(400).json({ items: [] });
-    }
+async function youtubeJson(url: URL) {
+  const response = await fetch(url, { cache: "no-store" });
+  const data = (await response.json()) as YouTubeError & Record<string, unknown>;
+  if (!response.ok) {
+    const reason = data.error?.errors?.[0]?.reason;
+    const quota = reason === "quotaExceeded" || reason === "rateLimitExceeded";
+    const error = new Error(
+      quota
+        ? "La cuota diaria de YouTube está agotada. Probá nuevamente mañana."
+        : data.error?.message || "YouTube no pudo responder.",
+    );
+    Object.assign(error, { status: quota ? 429 : response.status });
+    throw error;
+  }
+  return data;
+}
 
-    try {
-        let channelId = q as string;
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse,
+) {
+  if (req.method !== "GET")
+    return res.status(405).json({ error: "Método no permitido" });
+  if (!YOUTUBE_API_KEY)
+    return res.status(503).json({ error: "Falta configurar YouTube API Key" });
 
-        // simplistic check if it's a handle or url, resolving handles is complex without extra calls.
-        // We will assume the user inputs a search term for the channel to find ID first, or just searches videos.
-        // Strategy: Search for channel first if it looks like a handle (@...)
+  const query = typeof req.query.q === "string" ? req.query.q : "";
+  const reference = channelReference(query);
+  if (!reference)
+    return res.status(400).json({
+      error: "Pegá el enlace del canal, su @usuario o su identificador.",
+    });
 
-        if (channelId.startsWith('@') || channelId.includes('youtube.com')) {
-            // Search for the channel ID
-            const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(channelId)}&key=${YOUTUBE_API_KEY}`;
-            const searchRes = await fetch(searchUrl);
-            const searchData = await searchRes.json();
+  try {
+    const channelUrl = new URL(
+      "https://www.googleapis.com/youtube/v3/channels",
+    );
+    channelUrl.searchParams.set("part", "snippet,contentDetails");
+    channelUrl.searchParams.set(reference.key, reference.value);
+    channelUrl.searchParams.set("key", YOUTUBE_API_KEY);
+    const channelData = await youtubeJson(channelUrl);
+    const channel = (
+      channelData.items as
+        | {
+            id: string;
+            snippet?: { title?: string };
+            contentDetails?: { relatedPlaylists?: { uploads?: string } };
+          }[]
+        | undefined
+    )?.[0];
+    const uploads = channel?.contentDetails?.relatedPlaylists?.uploads;
+    if (!channel || !uploads)
+      return res.status(404).json({ error: "No encontramos ese canal." });
 
-            if (searchData.items && searchData.items.length > 0) {
-                channelId = searchData.items[0].id.channelId;
-            } else {
-                return res.status(404).json({ message: 'Channel not found' });
-            }
-        }
+    const items: {
+      id: { videoId: string };
+      snippet: {
+        title: string;
+        channelTitle: string;
+        thumbnails: { medium: { url: string } };
+      };
+    }[] = [];
+    let pageToken = "";
+    let page = 0;
+    do {
+      const videosUrl = new URL(
+        "https://www.googleapis.com/youtube/v3/playlistItems",
+      );
+      videosUrl.searchParams.set("part", "snippet");
+      videosUrl.searchParams.set("playlistId", uploads);
+      videosUrl.searchParams.set("maxResults", "50");
+      if (pageToken) videosUrl.searchParams.set("pageToken", pageToken);
+      videosUrl.searchParams.set("key", YOUTUBE_API_KEY);
+      const videosData = await youtubeJson(videosUrl);
+      const pageItems =
+        (videosData.items as
+          | {
+              snippet?: {
+                title?: string;
+                resourceId?: { videoId?: string };
+                thumbnails?: { medium?: { url?: string } };
+              };
+            }[]
+          | undefined) ?? [];
+      for (const item of pageItems) {
+        const videoId = item.snippet?.resourceId?.videoId;
+        const title = item.snippet?.title;
+        if (
+          !videoId ||
+          !title ||
+          ["Private video", "Deleted video"].includes(title)
+        )
+          continue;
+        items.push({
+          id: { videoId },
+          snippet: {
+            title,
+            channelTitle: channel.snippet?.title || query,
+            thumbnails: {
+              medium: {
+                url:
+                  item.snippet?.thumbnails?.medium?.url ||
+                  `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+              },
+            },
+          },
+        });
+      }
+      pageToken = (videosData.nextPageToken as string | undefined) ?? "";
+      page += 1;
+    } while (pageToken && page < MAX_PAGES);
 
-        // Now fetch videos from that channel
-        // We use searching for type=video within that channelId is often easier/better sorted by viewCount for "hits"
-        const videosUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&type=video&order=viewCount&maxResults=20&q=karaoke&key=${YOUTUBE_API_KEY}`;
-
-        const videosRes = await fetch(videosUrl);
-        const videosData = await videosRes.json();
-
-        res.status(200).json(videosData);
-    } catch (error) {
-        console.error('YouTube API Error:', error);
-        res.status(500).json({ error: 'Failed to fetch data' });
-    }
+    res.setHeader("Cache-Control", "private, max-age=300");
+    return res.status(200).json({
+      items,
+      channel: { id: channel.id, title: channel.snippet?.title || query },
+      total: items.length,
+      truncated: Boolean(pageToken),
+    });
+  } catch (caught) {
+    const error = caught as Error & { status?: number };
+    console.error("YouTube channel import error:", error.message);
+    return res
+      .status(error.status || 500)
+      .json({ error: error.message || "No se pudo importar el canal." });
+  }
 }
