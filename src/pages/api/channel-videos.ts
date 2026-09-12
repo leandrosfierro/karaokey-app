@@ -2,6 +2,8 @@ import type { NextApiRequest, NextApiResponse } from "next";
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const MAX_PAGES = 40;
+const SHORT_FORM_SECONDS = 120;
+const KARAOKE_SIGNAL = /\b(karaok[eé]s?|videoke|instrumental|backing\s*track|pista\s*(?:musical|karaoke)|sin\s*voz)\b/i;
 
 type YouTubeError = {
   error?: { message?: string; errors?: { reason?: string }[] };
@@ -37,6 +39,43 @@ async function youtubeJson(url: URL) {
   return data;
 }
 
+function durationInSeconds(value = "") {
+  const match = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return 0;
+  return Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
+}
+
+async function videoDetails(videoIds: string[]) {
+  const batches: string[][] = [];
+  for (let start = 0; start < videoIds.length; start += 50)
+    batches.push(videoIds.slice(start, start + 50));
+
+  const details: {
+    id: string;
+    contentDetails?: { duration?: string };
+    status?: { privacyStatus?: string; embeddable?: boolean };
+    snippet?: {
+      title?: string;
+      description?: string;
+      channelTitle?: string;
+      liveBroadcastContent?: string;
+    };
+    liveStreamingDetails?: Record<string, unknown>;
+  }[] = [];
+  for (let start = 0; start < batches.length; start += 5) {
+    const group = await Promise.all(batches.slice(start, start + 5).map(async (ids) => {
+      const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+      url.searchParams.set("part", "contentDetails,status,snippet,liveStreamingDetails");
+      url.searchParams.set("id", ids.join(","));
+      url.searchParams.set("key", YOUTUBE_API_KEY || "");
+      const data = await youtubeJson(url);
+      return (data.items as typeof details | undefined) ?? [];
+    }));
+    details.push(...group.flat());
+  }
+  return new Map(details.map((item) => [item.id, item]));
+}
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse,
@@ -57,7 +96,7 @@ export default async function handler(
     const channelUrl = new URL(
       "https://www.googleapis.com/youtube/v3/channels",
     );
-    channelUrl.searchParams.set("part", "snippet,contentDetails");
+    channelUrl.searchParams.set("part", "snippet,contentDetails,statistics");
     channelUrl.searchParams.set(reference.key, reference.value);
     channelUrl.searchParams.set("key", YOUTUBE_API_KEY);
     const channelData = await youtubeJson(channelUrl);
@@ -65,8 +104,9 @@ export default async function handler(
       channelData.items as
         | {
             id: string;
-            snippet?: { title?: string };
+            snippet?: { title?: string; description?: string };
             contentDetails?: { relatedPlaylists?: { uploads?: string } };
+            statistics?: { videoCount?: string };
           }[]
         | undefined
     )?.[0];
@@ -132,11 +172,62 @@ export default async function handler(
       page += 1;
     } while (pageToken && page < MAX_PAGES);
 
+    const details = await videoDetails(items.map((item) => item.id.videoId));
+    const audit = {
+      uploadsReviewed: items.length,
+      imported: 0,
+      shortForm: 0,
+      live: 0,
+      unavailable: 0,
+      withoutKaraokeSignal: 0,
+    };
+    const karaokeChannel = KARAOKE_SIGNAL.test(
+      `${channel.snippet?.title || ""} ${channel.snippet?.description || ""}`,
+    );
+    const filteredItems = items.filter((item) => {
+      const detail = details.get(item.id.videoId);
+      if (
+        !detail ||
+        detail.status?.privacyStatus !== "public" ||
+        detail.status?.embeddable === false
+      ) {
+        audit.unavailable += 1;
+        return false;
+      }
+      if (
+        detail.snippet?.liveBroadcastContent !== "none" ||
+        detail.liveStreamingDetails
+      ) {
+        audit.live += 1;
+        return false;
+      }
+      const seconds = durationInSeconds(detail.contentDetails?.duration);
+      if (seconds > 0 && seconds <= SHORT_FORM_SECONDS) {
+        audit.shortForm += 1;
+        return false;
+      }
+      const karaokeVideo = KARAOKE_SIGNAL.test(
+        `${detail.snippet?.title || item.snippet.title} ${detail.snippet?.description || ""}`,
+      );
+      if (!karaokeChannel && !karaokeVideo) {
+        audit.withoutKaraokeSignal += 1;
+        return false;
+      }
+      audit.imported += 1;
+      return true;
+    });
+
     res.setHeader("Cache-Control", "private, max-age=300");
     return res.status(200).json({
-      items,
-      channel: { id: channel.id, title: channel.snippet?.title || query },
-      total: items.length,
+      items: filteredItems,
+      channel: {
+        id: channel.id,
+        title: channel.snippet?.title || query,
+        karaokeVerified: karaokeChannel,
+      },
+      total: filteredItems.length,
+      channelVideoCount: Number(channel.statistics?.videoCount || 0),
+      audit,
       truncated: Boolean(pageToken),
     });
   } catch (caught) {
